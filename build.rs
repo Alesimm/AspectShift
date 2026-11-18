@@ -16,7 +16,7 @@ fn main() {
         res.set_manifest(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.2.2.0" processorArchitecture="amd64" name="AspectShift" type="win32" />
+  <assemblyIdentity version="1.2.3.0" processorArchitecture="amd64" name="AspectShift" type="win32" />
   <description>Gestor de resoluciones y relacion de aspecto</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>

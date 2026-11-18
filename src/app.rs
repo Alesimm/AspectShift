@@ -1103,6 +1103,79 @@ impl AspectShiftApp {
     }
 
     fn render_update_banner(&mut self, ui: &mut Ui) {
+        if self.show_updated_modal {
+            let mut close_banner = false;
+            let mut open_gh = false;
+
+            Frame::none()
+                .fill(BG_CARD_ACTIVE)
+                .stroke(Stroke::new(1.0_f32, STATUS_OK))
+                .rounding(Rounding::same(6.0_f32))
+                .inner_margin(Margin::symmetric(10.0_f32, 6.0_f32))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (dot_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(8.0_f32, 8.0_f32), Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot_rect.center(), 3.2_f32, STATUS_OK);
+
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "Actualizado a v{} · Más info en GitHub",
+                                    env!("CARGO_PKG_VERSION")
+                                ))
+                                .size(11.5_f32)
+                                .color(TEXT_PRIMARY),
+                            )
+                            .truncate(),
+                        );
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let (x_rect, x_resp) = ui.allocate_exact_size(
+                                Vec2::new(18.0_f32, 18.0_f32),
+                                Sense::click(),
+                            );
+                            if x_resp.hovered() {
+                                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                            }
+                            let x_col = if x_resp.hovered() {
+                                TEXT_PRIMARY
+                            } else {
+                                TEXT_MUTED
+                            };
+                            draw_cross(ui.painter(), x_rect.center(), 3.5_f32, x_col);
+                            if x_resp.clicked() {
+                                close_banner = true;
+                            }
+
+                            if Self::animated_button(
+                                ui,
+                                "banner_updated_gh_btn",
+                                "Ver GitHub",
+                                11.0_f32,
+                                false,
+                                false,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                open_gh = true;
+                            }
+                        });
+                    });
+                });
+
+            ui.add_space(6.0_f32);
+
+            if open_gh {
+                open_github_releases();
+                self.show_updated_modal = false;
+            } else if close_banner {
+                self.show_updated_modal = false;
+            }
+        }
+
         let Some(info) = self.available_update.clone() else {
             return;
         };
@@ -1654,80 +1727,6 @@ impl AspectShiftApp {
                 });
             });
     }
-
-    fn render_post_update_modal(&mut self, ctx: &egui::Context) {
-        if !self.show_updated_modal {
-            return;
-        }
-
-        egui::Area::new(Id::new("updated_modal_backdrop"))
-            .order(Order::Foreground)
-            .fixed_pos(Pos2::ZERO)
-            .show(ctx, |ui| {
-                let screen = ctx.screen_rect();
-                ui.painter().rect_filled(
-                    screen,
-                    Rounding::ZERO,
-                    Color32::from_rgba_unmultiplied(0, 0, 0, 175),
-                );
-            });
-
-        let modal_w = (ctx.screen_rect().width() - 32.0_f32).clamp(260.0_f32, 350.0_f32);
-
-        egui::Window::new("Actualización completada")
-            .order(Order::Foreground)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .fixed_size(Vec2::new(modal_w, 114.0_f32))
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0_f32;
-                ui.label(
-                    RichText::new(format!("Actualizado a v{}", env!("CARGO_PKG_VERSION")))
-                        .size(13.0_f32)
-                        .strong()
-                        .color(STATUS_OK),
-                );
-                ui.label(
-                    RichText::new("Para más información y novedades, revisa GitHub.")
-                        .size(11.5_f32)
-                        .color(TEXT_MUTED),
-                );
-
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if Self::animated_button(
-                            ui,
-                            "updated_close_btn",
-                            "Cerrar",
-                            11.5_f32,
-                            true,
-                            false,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.show_updated_modal = false;
-                        }
-
-                        if Self::animated_button(
-                            ui,
-                            "updated_github_btn",
-                            "Ver GitHub",
-                            11.5_f32,
-                            false,
-                            false,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            open_github_releases();
-                            self.show_updated_modal = false;
-                        }
-                    });
-                });
-            });
-    }
 }
 
 impl eframe::App for AspectShiftApp {
@@ -1844,7 +1843,6 @@ impl eframe::App for AspectShiftApp {
             });
 
         self.render_confirm_modal(ctx);
-        self.render_post_update_modal(ctx);
         self.render_guide_modal(ctx);
     }
 
