@@ -33,7 +33,7 @@ La idea nació de querer contar con una herramienta ligera, rápida y portable p
 - **Aviso flotante en pantalla adaptado a DPI**: Muestra brevemente la resolución aplicada en la parte superior del monitor correspondiente sin robar foco ni bloquear clics.
 - **Ajuste opcional de ventana sin bordes**: Desde **Opciones** puedes elegir manualmente una ventana específica (o usar `Ctrl+Alt+B` sobre la ventana enfocada) para quitarle bordes y adaptarla a su propio monitor actual.
 - **Atajos globales**: Hilo nativo de bajo consumo mediante `RegisterHotKey` con detección de conflictos.
-- **Actualizaciones integradas desde GitHub Releases**: Comprueba en segundo plano si existe una versión más nueva y permite renovarse con un clic usando `WinHTTP` nativo de Windows.
+- **Actualizaciones integradas desde GitHub Releases**: Comprueba al iniciar y periódicamente cada 30 minutos en segundo plano (0% CPU en reposo) si existe una versión más nueva, permitiendo renovarse con un clic vía `WinHTTP` nativo y ver confirmación al reiniciar.
 
 ---
 

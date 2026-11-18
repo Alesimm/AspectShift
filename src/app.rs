@@ -16,7 +16,9 @@ use crate::hotkeys::{GlobalHotkeyListener, HotkeyAction};
 use crate::integration::{is_in_start_menu, register_in_start_menu, remove_from_start_menu};
 use crate::presets::{builtin_presets, format_aspect_ratio, PresetCategory, ResolutionPreset};
 use crate::toast::ScreenToast;
-use crate::updater::{apply_downloaded_update, ReleaseInfo, UpdateEvent, UpdateManager};
+use crate::updater::{
+    apply_downloaded_update, open_github_releases, ReleaseInfo, UpdateEvent, UpdateManager,
+};
 use crate::window_stretch::{
     apply_borderless_window, find_foreground_window, get_window_center, scan_candidate_windows,
     CandidateWindow,
@@ -131,6 +133,7 @@ pub struct AspectShiftApp {
     status_kind: StatusKind,
     show_options_panel: bool,
     show_guide_modal: bool,
+    show_updated_modal: bool,
     last_mode_poll: Instant,
 
     pending_confirm: Option<PendingConfirmation>,
@@ -138,7 +141,7 @@ pub struct AspectShiftApp {
 
     update_manager: UpdateManager,
     available_update: Option<ReleaseInfo>,
-    update_dismissed: bool,
+    dismissed_update_tag: Option<String>,
     update_checking: bool,
     update_downloading: bool,
     in_start_menu: bool,
@@ -148,7 +151,11 @@ pub struct AspectShiftApp {
 }
 
 impl AspectShiftApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, icon_rgba_64: &[u8]) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        icon_rgba_64: &[u8],
+        just_updated: bool,
+    ) -> Self {
         Self::configure_fonts(&cc.egui_ctx);
         Self::configure_theme(&cc.egui_ctx);
 
@@ -190,7 +197,7 @@ impl AspectShiftApp {
 
         let screen_toast = ScreenToast::new();
         let update_manager = UpdateManager::new();
-        update_manager.check_for_updates(cc.egui_ctx.clone(), false);
+        update_manager.start_periodic_checks(cc.egui_ctx.clone());
 
         Self {
             custom_w_input: config.last_stretch_res.0.to_string(),
@@ -208,12 +215,13 @@ impl AspectShiftApp {
             status_kind,
             show_options_panel: false,
             show_guide_modal: false,
+            show_updated_modal: just_updated,
             last_mode_poll: Instant::now(),
             pending_confirm: None,
             screen_toast,
             update_manager,
             available_update: None,
-            update_dismissed: false,
+            dismissed_update_tag: None,
             update_checking: true,
             update_downloading: false,
             in_start_menu: is_in_start_menu(),
@@ -1098,7 +1106,7 @@ impl AspectShiftApp {
         let Some(info) = self.available_update.clone() else {
             return;
         };
-        if self.update_dismissed {
+        if self.dismissed_update_tag.as_deref() == Some(info.version_tag.as_str()) {
             return;
         }
 
@@ -1166,7 +1174,7 @@ impl AspectShiftApp {
         ui.add_space(6.0_f32);
 
         if dismiss {
-            self.update_dismissed = true;
+            self.dismissed_update_tag = Some(info.version_tag);
         } else if start_download {
             self.update_downloading = true;
             self.status_text = format!("Descargando {}...", info.version_tag);
@@ -1646,6 +1654,80 @@ impl AspectShiftApp {
                 });
             });
     }
+
+    fn render_post_update_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_updated_modal {
+            return;
+        }
+
+        egui::Area::new(Id::new("updated_modal_backdrop"))
+            .order(Order::Foreground)
+            .fixed_pos(Pos2::ZERO)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter().rect_filled(
+                    screen,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 175),
+                );
+            });
+
+        let modal_w = (ctx.screen_rect().width() - 32.0_f32).clamp(260.0_f32, 350.0_f32);
+
+        egui::Window::new("Actualización completada")
+            .order(Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(modal_w, 114.0_f32))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0_f32;
+                ui.label(
+                    RichText::new(format!("Actualizado a v{}", env!("CARGO_PKG_VERSION")))
+                        .size(13.0_f32)
+                        .strong()
+                        .color(STATUS_OK),
+                );
+                ui.label(
+                    RichText::new("Para más información y novedades, revisa GitHub.")
+                        .size(11.5_f32)
+                        .color(TEXT_MUTED),
+                );
+
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if Self::animated_button(
+                            ui,
+                            "updated_close_btn",
+                            "Cerrar",
+                            11.5_f32,
+                            true,
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.show_updated_modal = false;
+                        }
+
+                        if Self::animated_button(
+                            ui,
+                            "updated_github_btn",
+                            "Ver GitHub",
+                            11.5_f32,
+                            false,
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            open_github_releases();
+                            self.show_updated_modal = false;
+                        }
+                    });
+                });
+            });
+    }
 }
 
 impl eframe::App for AspectShiftApp {
@@ -1656,8 +1738,10 @@ impl eframe::App for AspectShiftApp {
                     self.update_checking = false;
                     match result {
                         Ok(Some(info)) => {
+                            if manual {
+                                self.dismissed_update_tag = None;
+                            }
                             self.available_update = Some(info);
-                            self.update_dismissed = false;
                         }
                         Ok(None) => {
                             if manual {
@@ -1720,6 +1804,8 @@ impl eframe::App for AspectShiftApp {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if self.pending_confirm.is_some() {
                 self.revert_pending_confirmation();
+            } else if self.show_updated_modal {
+                self.show_updated_modal = false;
             } else if self.show_guide_modal {
                 self.show_guide_modal = false;
             }
@@ -1758,6 +1844,7 @@ impl eframe::App for AspectShiftApp {
             });
 
         self.render_confirm_modal(ctx);
+        self.render_post_update_modal(ctx);
         self.render_guide_modal(ctx);
     }
 

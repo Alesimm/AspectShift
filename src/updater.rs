@@ -6,6 +6,7 @@ use std::process::Command;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::Duration;
 
 use serde::Deserialize;
 use windows_sys::Win32::Networking::WinHttp::{
@@ -19,6 +20,7 @@ use windows_sys::Win32::Networking::WinHttp::{
 const GITHUB_LATEST_URL: &str = "https://api.github.com/repos/Alesimm/AspectShift/releases/latest";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(1800);
 
 #[derive(Debug, Clone)]
 pub struct ReleaseInfo {
@@ -200,6 +202,29 @@ fn winhttp_get(url: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Consulta la última versión en GitHub y devuelve `Some(ReleaseInfo)` solo si es más reciente.
+fn fetch_latest_release() -> Result<Option<ReleaseInfo>, String> {
+    let data = winhttp_get(GITHUB_LATEST_URL)?;
+    let release: GitHubReleaseApi = serde_json::from_slice(&data)
+        .map_err(|_| "No se pudo leer la respuesta de versión.".to_string())?;
+
+    if !is_newer_version(&release.tag_name, CURRENT_VERSION) {
+        return Ok(None);
+    }
+
+    let asset = release
+        .assets
+        .into_iter()
+        .find(|a| a.name.eq_ignore_ascii_case("AspectShift.exe"))
+        .ok_or_else(|| "El nuevo lanzamiento no incluye ejecutable.".to_string())?;
+
+    Ok(Some(ReleaseInfo {
+        version_tag: release.tag_name,
+        download_url: asset.browser_download_url,
+        expected_size: asset.size,
+    }))
+}
+
 /// Gestiona comprobaciones y descargas en segundo plano sin bloquear la interfaz.
 pub struct UpdateManager {
     tx: mpsc::Sender<UpdateEvent>,
@@ -216,36 +241,43 @@ impl UpdateManager {
         self.rx.try_recv().ok()
     }
 
-    /// Consulta en segundo plano la última versión publicada en GitHub Releases.
+    /// Inicia una comprobación al abrir y repite cada 30 minutos con 0% de CPU en reposo.
+    pub fn start_periodic_checks(&self, ctx: egui::Context) {
+        let tx = self.tx.clone();
+        thread::Builder::new()
+            .name("aspectshift-update-poller".to_string())
+            .spawn(move || {
+                // Primera comprobación al iniciar la aplicación
+                let initial = fetch_latest_release();
+                let _ = tx.send(UpdateEvent::CheckResult {
+                    manual: false,
+                    result: initial,
+                });
+                ctx.request_repaint();
+
+                loop {
+                    thread::sleep(AUTO_CHECK_INTERVAL);
+                    let res = fetch_latest_release();
+                    if let Ok(Some(info)) = res {
+                        let _ = tx.send(UpdateEvent::CheckResult {
+                            manual: false,
+                            result: Ok(Some(info)),
+                        });
+                        // Solo despierta la interfaz si realmente apareció una nueva versión
+                        ctx.request_repaint();
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// Consulta manualmente en segundo plano la última versión publicada en GitHub Releases.
     pub fn check_for_updates(&self, ctx: egui::Context, manual: bool) {
         let tx = self.tx.clone();
         thread::Builder::new()
             .name("aspectshift-update-check".to_string())
             .spawn(move || {
-                let res = (|| -> Result<Option<ReleaseInfo>, String> {
-                    let data = winhttp_get(GITHUB_LATEST_URL)?;
-                    let release: GitHubReleaseApi = serde_json::from_slice(&data)
-                        .map_err(|_| "No se pudo leer la respuesta de versión.".to_string())?;
-
-                    if !is_newer_version(&release.tag_name, CURRENT_VERSION) {
-                        return Ok(None);
-                    }
-
-                    let asset = release
-                        .assets
-                        .into_iter()
-                        .find(|a| a.name.eq_ignore_ascii_case("AspectShift.exe"))
-                        .ok_or_else(|| {
-                            "El nuevo lanzamiento no incluye ejecutable.".to_string()
-                        })?;
-
-                    Ok(Some(ReleaseInfo {
-                        version_tag: release.tag_name,
-                        download_url: asset.browser_download_url,
-                        expected_size: asset.size,
-                    }))
-                })();
-
+                let res = fetch_latest_release();
                 let _ = tx.send(UpdateEvent::CheckResult {
                     manual,
                     result: res,
@@ -303,7 +335,7 @@ pub fn apply_downloaded_update(temp_exe: &PathBuf) -> Result<(), String> {
          )\r\n\
          :done\r\n\
          del /Q \"%SRC%\" > nul 2>&1\r\n\
-         start \"\" \"%DST%\"\r\n\
+         start \"\" \"%DST%\" --updated\r\n\
          del \"%~f0\" > nul 2>&1\r\n"
     );
 
@@ -317,6 +349,19 @@ pub fn apply_downloaded_update(temp_exe: &PathBuf) -> Result<(), String> {
         .map_err(|e| format!("No se pudo iniciar el proceso de actualización: {}", e))?;
 
     Ok(())
+}
+
+/// Abre la página del último lanzamiento en GitHub usando el navegador predeterminado.
+pub fn open_github_releases() {
+    let _ = Command::new("cmd")
+        .args([
+            "/C",
+            "start",
+            "",
+            "https://github.com/Alesimm/AspectShift/releases/latest",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
 }
 
 #[cfg(test)]

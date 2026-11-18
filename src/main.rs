@@ -72,6 +72,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    let just_updated = args.iter().any(|a| a == "--updated");
     let icon_data = egui::IconData {
         rgba: ICON_RGBA_64.to_vec(),
         width: 64,
@@ -101,7 +102,7 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| {
             enable_dark_titlebar_by_title(window_title);
-            Ok(Box::new(AspectShiftApp::new(cc, ICON_RGBA_64)))
+            Ok(Box::new(AspectShiftApp::new(cc, ICON_RGBA_64, just_updated)))
         }),
     )
 }
