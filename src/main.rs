@@ -6,6 +6,7 @@ mod display;
 mod hotkeys;
 mod presets;
 mod toast;
+mod updater;
 mod window_stretch;
 
 use std::ffi::c_void;

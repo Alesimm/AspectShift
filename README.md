@@ -33,6 +33,7 @@ La idea nació de querer contar con una herramienta ligera, rápida y portable p
 - **Aviso flotante en pantalla adaptado a DPI**: Muestra brevemente la resolución aplicada en la parte superior del monitor correspondiente sin robar foco ni bloquear clics.
 - **Ajuste opcional de ventana sin bordes**: Desde **Opciones** puedes elegir manualmente una ventana específica (o usar `Ctrl+Alt+B` sobre la ventana enfocada) para quitarle bordes y adaptarla a su propio monitor actual.
 - **Atajos globales**: Hilo nativo de bajo consumo mediante `RegisterHotKey` con detección de conflictos.
+- **Actualizaciones integradas desde GitHub Releases**: Comprueba en segundo plano si existe una versión más nueva y permite renovarse con un clic usando `WinHTTP` nativo de Windows.
 
 ---
 
@@ -72,6 +73,7 @@ AspectShift/
 │   ├── display.rs           # Enumeración de monitores y cambio de resolución Win32
 │   ├── window_stretch.rs    # Utilidad opcional de ajuste sin bordes por ventana
 │   ├── toast.rs             # Notificación flotante minimalista en pantalla
+│   ├── updater.rs           # Comprobación y renovación automática vía WinHTTP
 │   ├── hotkeys.rs           # Escucha de atajos globales en segundo plano
 │   ├── presets.rs           # Catálogo de resoluciones y cálculo de proporción
 │   └── config.rs            # Persistencia portable en aspectshift_config.json

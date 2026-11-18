@@ -15,6 +15,7 @@ use crate::display::{
 use crate::hotkeys::{GlobalHotkeyListener, HotkeyAction};
 use crate::presets::{builtin_presets, format_aspect_ratio, PresetCategory, ResolutionPreset};
 use crate::toast::ScreenToast;
+use crate::updater::{apply_downloaded_update, ReleaseInfo, UpdateEvent, UpdateManager};
 use crate::window_stretch::{
     apply_borderless_window, find_foreground_window, get_window_center, scan_candidate_windows,
     CandidateWindow,
@@ -134,6 +135,12 @@ pub struct AspectShiftApp {
     pending_confirm: Option<PendingConfirmation>,
     screen_toast: ScreenToast,
 
+    update_manager: UpdateManager,
+    available_update: Option<ReleaseInfo>,
+    update_dismissed: bool,
+    update_checking: bool,
+    update_downloading: bool,
+
     logo_texture: Option<TextureHandle>,
     hotkey_listener: GlobalHotkeyListener,
 }
@@ -180,6 +187,8 @@ impl AspectShiftApp {
         };
 
         let screen_toast = ScreenToast::new();
+        let update_manager = UpdateManager::new();
+        update_manager.check_for_updates(cc.egui_ctx.clone(), false);
 
         Self {
             custom_w_input: config.last_stretch_res.0.to_string(),
@@ -200,6 +209,11 @@ impl AspectShiftApp {
             last_mode_poll: Instant::now(),
             pending_confirm: None,
             screen_toast,
+            update_manager,
+            available_update: None,
+            update_dismissed: false,
+            update_checking: true,
+            update_downloading: false,
             logo_texture,
             hotkey_listener,
         }
@@ -1006,11 +1020,119 @@ impl AspectShiftApp {
                         {
                             self.show_guide_modal = !self.show_guide_modal;
                         }
+
+                        let check_label = if self.update_checking {
+                            "Buscando..."
+                        } else {
+                            "Buscar actualización"
+                        };
+                        if Self::animated_button(
+                            ui,
+                            "opt_check_update_btn",
+                            check_label,
+                            11.0_f32,
+                            false,
+                            false,
+                            !self.update_checking && !self.update_downloading,
+                        )
+                        .clicked()
+                        {
+                            self.update_checking = true;
+                            self.update_manager
+                                .check_for_updates(ui.ctx().clone(), true);
+                        }
+
+                        ui.label(
+                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .size(10.5_f32)
+                                .color(TEXT_DIM),
+                        );
                     });
                 });
         });
 
         ui.add_space(6.0_f32 * ease);
+    }
+
+    fn render_update_banner(&mut self, ui: &mut Ui) {
+        let Some(info) = self.available_update.clone() else {
+            return;
+        };
+        if self.update_dismissed {
+            return;
+        }
+
+        let mut start_download = false;
+        let mut dismiss = false;
+
+        Frame::none()
+            .fill(BG_CARD_ACTIVE)
+            .stroke(Stroke::new(1.0_f32, ACCENT))
+            .rounding(Rounding::same(6.0_f32))
+            .inner_margin(Margin::symmetric(10.0_f32, 6.0_f32))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(8.0_f32, 8.0_f32), Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), 3.2_f32, ACCENT_SOFT);
+
+                    ui.label(
+                        RichText::new(format!("Nueva versión {} disponible", info.version_tag))
+                            .size(11.5_f32)
+                            .color(TEXT_PRIMARY),
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let (x_rect, x_resp) = ui.allocate_exact_size(
+                            Vec2::new(18.0_f32, 18.0_f32),
+                            Sense::click(),
+                        );
+                        if x_resp.hovered() {
+                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                        }
+                        let x_col = if x_resp.hovered() {
+                            TEXT_PRIMARY
+                        } else {
+                            TEXT_MUTED
+                        };
+                        draw_cross(ui.painter(), x_rect.center(), 3.5_f32, x_col);
+                        if x_resp.clicked() && !self.update_downloading {
+                            dismiss = true;
+                        }
+
+                        let btn_label = if self.update_downloading {
+                            "Descargando..."
+                        } else {
+                            "Actualizar"
+                        };
+                        if Self::animated_button(
+                            ui,
+                            "banner_update_btn",
+                            btn_label,
+                            11.0_f32,
+                            true,
+                            false,
+                            !self.update_downloading,
+                        )
+                        .clicked()
+                        {
+                            start_download = true;
+                        }
+                    });
+                });
+            });
+
+        ui.add_space(6.0_f32);
+
+        if dismiss {
+            self.update_dismissed = true;
+        } else if start_download {
+            self.update_downloading = true;
+            self.status_text = format!("Descargando {}...", info.version_tag);
+            self.status_kind = StatusKind::Ready;
+            self.update_manager.download_release(ui.ctx().clone(), info);
+        }
     }
 
     fn render_resolution_grid(&mut self, ui: &mut Ui) {
@@ -1488,6 +1610,53 @@ impl AspectShiftApp {
 
 impl eframe::App for AspectShiftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Some(ev) = self.update_manager.poll() {
+            match ev {
+                UpdateEvent::CheckResult { manual, result } => {
+                    self.update_checking = false;
+                    match result {
+                        Ok(Some(info)) => {
+                            self.available_update = Some(info);
+                            self.update_dismissed = false;
+                        }
+                        Ok(None) => {
+                            if manual {
+                                self.status_text = format!(
+                                    "Ya tienes la última versión (v{})",
+                                    env!("CARGO_PKG_VERSION")
+                                );
+                                self.status_kind = StatusKind::Success;
+                            }
+                        }
+                        Err(err) => {
+                            if manual {
+                                self.status_text = err;
+                                self.status_kind = StatusKind::Warning;
+                            }
+                        }
+                    }
+                }
+                UpdateEvent::DownloadFinished(res) => {
+                    self.update_downloading = false;
+                    match res {
+                        Ok(temp_exe) => match apply_downloaded_update(&temp_exe) {
+                            Ok(()) => {
+                                ctx.send_viewport_cmd(ViewportCommand::Close);
+                            }
+                            Err(err) => {
+                                self.status_text = err;
+                                self.status_kind = StatusKind::Error;
+                            }
+                        },
+                        Err(err) => {
+                            self.status_text = err;
+                            self.status_kind = StatusKind::Warning;
+                        }
+                    }
+                }
+            }
+        }
+
         while let Some(action) = self.hotkey_listener.poll() {
             match action {
                 HotkeyAction::ApplyFavoriteStretch => {
@@ -1535,6 +1704,7 @@ impl eframe::App for AspectShiftApp {
                     .inner_margin(Margin::symmetric(12.0_f32, 8.0_f32)),
             )
             .show(ctx, |ui| {
+                self.render_update_banner(ui);
                 self.render_category_bar(ui);
                 ui.add_space(6.0_f32);
 
