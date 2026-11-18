@@ -12,6 +12,7 @@ use crate::display::{
 };
 use crate::hotkeys::{GlobalHotkeyListener, HotkeyAction};
 use crate::presets::{builtin_presets, format_aspect_ratio, PresetCategory, ResolutionPreset};
+use crate::toast::ScreenToast;
 use crate::window_stretch::{
     apply_borderless_window, find_foreground_window, get_window_center, scan_candidate_windows,
     CandidateWindow,
@@ -21,10 +22,11 @@ use crate::window_stretch::{
 const BG_DARK: Color32 = Color32::from_rgb(18, 19, 22);
 const BG_PANEL: Color32 = Color32::from_rgb(23, 25, 30);
 const BG_CARD: Color32 = Color32::from_rgb(28, 31, 38);
-const BG_CARD_HOVER: Color32 = Color32::from_rgb(36, 40, 50);
-const BG_CARD_ACTIVE: Color32 = Color32::from_rgb(29, 37, 52);
+const BG_CARD_HOVER: Color32 = Color32::from_rgb(38, 42, 53);
+const BG_CARD_ACTIVE: Color32 = Color32::from_rgb(29, 38, 55);
 
 const ACCENT: Color32 = Color32::from_rgb(110, 142, 247);
+const ACCENT_HOVER: Color32 = Color32::from_rgb(128, 157, 252);
 const ACCENT_SOFT: Color32 = Color32::from_rgb(142, 168, 250);
 const STATUS_OK: Color32 = Color32::from_rgb(86, 182, 159);
 const STATUS_WARN: Color32 = Color32::from_rgb(218, 165, 85);
@@ -33,7 +35,7 @@ const TEXT_PRIMARY: Color32 = Color32::from_rgb(236, 238, 242);
 const TEXT_MUTED: Color32 = Color32::from_rgb(148, 155, 166);
 const TEXT_DIM: Color32 = Color32::from_rgb(99, 106, 117);
 const BORDER: Color32 = Color32::from_rgb(40, 44, 53);
-const BORDER_HOVER: Color32 = Color32::from_rgb(64, 71, 86);
+const BORDER_HOVER: Color32 = Color32::from_rgb(68, 76, 94);
 
 /// Interpola suavemente entre dos colores para animaciones fluidas.
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -55,6 +57,12 @@ enum StatusKind {
     Error,
 }
 
+struct InAppToast {
+    text: String,
+    is_native: bool,
+    started_at: Instant,
+}
+
 /// Estado principal de la interfaz de AspectShift.
 pub struct AspectShiftApp {
     config: AppConfig,
@@ -63,6 +71,7 @@ pub struct AspectShiftApp {
     selected_hz: Option<u32>,
 
     selected_category: PresetCategory,
+    category_changed_at: Instant,
     builtin: Vec<ResolutionPreset>,
 
     custom_w_input: String,
@@ -77,6 +86,9 @@ pub struct AspectShiftApp {
     show_options_panel: bool,
     show_guide_modal: bool,
     last_mode_poll: Instant,
+
+    in_app_toast: Option<InAppToast>,
+    screen_toast: ScreenToast,
 
     logo_texture: Option<TextureHandle>,
     hotkey_listener: GlobalHotkeyListener,
@@ -112,6 +124,7 @@ impl AspectShiftApp {
         };
 
         let hotkey_listener = GlobalHotkeyListener::start(cc.egui_ctx.clone());
+        let screen_toast = ScreenToast::new();
 
         Self {
             custom_w_input: config.last_stretch_res.0.to_string(),
@@ -121,6 +134,7 @@ impl AspectShiftApp {
             selected_monitor: 0,
             selected_hz: None,
             selected_category: PresetCategory::Featured,
+            category_changed_at: Instant::now() - Duration::from_secs(1),
             builtin: builtin_presets(),
             candidate_windows,
             selected_window_idx: 0,
@@ -129,6 +143,8 @@ impl AspectShiftApp {
             show_options_panel: false,
             show_guide_modal: false,
             last_mode_poll: Instant::now(),
+            in_app_toast: None,
+            screen_toast,
             logo_texture,
             hotkey_listener,
         }
@@ -165,7 +181,7 @@ impl AspectShiftApp {
 
     fn configure_theme(ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
-        style.animation_time = 0.24_f32;
+        style.animation_time = 0.22_f32;
         style.visuals = egui::Visuals::dark();
         style.visuals.panel_fill = BG_DARK;
         style.visuals.window_fill = BG_PANEL;
@@ -198,6 +214,109 @@ impl AspectShiftApp {
         ctx.set_style(style);
     }
 
+    /// Dibuja un botón minimalista con transiciones suaves de color, borde y presión.
+    fn animated_button(
+        ui: &mut Ui,
+        id_salt: impl std::hash::Hash,
+        label: &str,
+        font_size: f32,
+        primary: bool,
+        active: bool,
+        enabled: bool,
+    ) -> egui::Response {
+        let btn_id = Id::new(id_salt);
+        let galley = ui.painter().layout_no_wrap(
+            label.to_string(),
+            FontId::new(font_size, FontFamily::Proportional),
+            TEXT_PRIMARY,
+        );
+        let size = Vec2::new(
+            (galley.size().x + 18.0_f32).max(44.0_f32),
+            (galley.size().y + 10.0_f32).max(24.0_f32),
+        );
+        let sense = if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        let (rect, response) = ui.allocate_exact_size(size, sense);
+
+        let hover_t = ui.ctx().animate_bool_with_time(
+            btn_id.with("hover"),
+            enabled && response.hovered(),
+            0.18_f32,
+        );
+        let active_t =
+            ui.ctx()
+                .animate_bool_with_time(btn_id.with("active"), active, 0.20_f32);
+        let press_t = ui.ctx().animate_bool_with_time(
+            btn_id.with("press"),
+            enabled && response.is_pointer_button_down_on(),
+            0.09_f32,
+        );
+
+        if enabled && response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+
+        let visual_rect = rect.translate(Vec2::new(0.0_f32, 0.8_f32 * press_t));
+        let (base_fill, hover_fill, base_stroke, hover_stroke, base_text, hover_text) = if primary
+        {
+            (
+                ACCENT,
+                ACCENT_HOVER,
+                ACCENT,
+                ACCENT_SOFT,
+                Color32::WHITE,
+                Color32::WHITE,
+            )
+        } else {
+            (
+                BG_CARD,
+                BG_CARD_HOVER,
+                BORDER,
+                BORDER_HOVER,
+                TEXT_MUTED,
+                TEXT_PRIMARY,
+            )
+        };
+
+        let mut fill = lerp_color(base_fill, hover_fill, hover_t);
+        let mut stroke_col = lerp_color(base_stroke, hover_stroke, hover_t);
+        let mut text_col = lerp_color(base_text, hover_text, hover_t);
+
+        if !primary {
+            fill = lerp_color(fill, BG_CARD_ACTIVE, active_t);
+            stroke_col = lerp_color(stroke_col, ACCENT, active_t);
+            text_col = lerp_color(text_col, TEXT_PRIMARY, active_t);
+        }
+
+        if !enabled {
+            fill = BG_PANEL;
+            stroke_col = BORDER;
+            text_col = TEXT_DIM;
+        } else if press_t > 0.01_f32 {
+            fill = lerp_color(fill, BG_DARK, 0.14_f32 * press_t);
+        }
+
+        let painter = ui.painter_at(visual_rect.expand(1.0_f32));
+        painter.rect(
+            visual_rect,
+            Rounding::same(6.0_f32),
+            fill,
+            Stroke::new(1.0_f32, stroke_col),
+        );
+        painter.text(
+            visual_rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::new(font_size, FontFamily::Proportional),
+            text_col,
+        );
+
+        response
+    }
+
     fn current_monitor(&self) -> Option<&MonitorInfo> {
         self.monitors.get(self.selected_monitor)
     }
@@ -227,6 +346,26 @@ impl AspectShiftApp {
         }
     }
 
+    fn notify_resolution_changed(
+        &mut self,
+        mode: crate::display::DisplayMode,
+        is_native: bool,
+    ) {
+        let label = if is_native {
+            format!("Nativa · {} × {} · {} Hz", mode.width, mode.height, mode.hz)
+        } else {
+            format!("{} × {} · {} Hz", mode.width, mode.height, mode.hz)
+        };
+
+        self.in_app_toast = Some(InAppToast {
+            text: label.clone(),
+            is_native,
+            started_at: Instant::now(),
+        });
+        self.screen_toast
+            .show(mode.pos_x, mode.pos_y, mode.width, label, is_native);
+    }
+
     /// Cambia la resolución únicamente del monitor elegido sin alterar ni mover ventanas abiertas.
     fn trigger_apply_resolution(&mut self, width: u32, height: u32) {
         let Some(mon) = self.current_monitor().cloned() else {
@@ -248,11 +387,13 @@ impl AspectShiftApp {
                     m.current_mode = res.applied_mode;
                 }
                 let ratio = width as f32 / height.max(1) as f32;
-                if (ratio - 16.0_f32 / 9.0_f32).abs() > 0.03_f32 {
+                let is_native_ratio = (ratio - 16.0_f32 / 9.0_f32).abs() <= 0.03_f32;
+                if !is_native_ratio {
                     self.config.last_stretch_res = (width, height);
                     self.config.save();
                 }
 
+                self.notify_resolution_changed(res.applied_mode, is_native_ratio);
                 self.status_text = res.message;
                 self.status_kind = StatusKind::Success;
             }
@@ -273,6 +414,7 @@ impl AspectShiftApp {
                 if let Some(m) = self.monitors.get_mut(self.selected_monitor) {
                     m.current_mode = res.applied_mode;
                 }
+                self.notify_resolution_changed(res.applied_mode, true);
                 self.status_text = res.message;
                 self.status_kind = StatusKind::Success;
             }
@@ -419,45 +561,33 @@ impl AspectShiftApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0_f32;
 
-                        let opts_t = ui.ctx().animate_bool_with_time(
-                            Id::new("opts_btn_anim"),
-                            self.show_options_panel,
-                            0.20_f32,
-                        );
-                        let opts_fill = lerp_color(BG_CARD, BG_CARD_ACTIVE, opts_t);
-                        let opts_stroke = lerp_color(BORDER, ACCENT, opts_t);
                         let opts_label = if compact { "Ajustes" } else { "Opciones" };
-
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(opts_label)
-                                        .size(11.5_f32)
-                                        .color(TEXT_PRIMARY),
-                                )
-                                .fill(opts_fill)
-                                .stroke(Stroke::new(1.0_f32, opts_stroke))
-                                .rounding(Rounding::same(5.0_f32)),
-                            )
-                            .on_hover_text("Mostrar u ocultar opciones avanzadas")
-                            .clicked()
+                        if Self::animated_button(
+                            ui,
+                            "hdr_opts_btn",
+                            opts_label,
+                            11.5_f32,
+                            false,
+                            self.show_options_panel,
+                            true,
+                        )
+                        .on_hover_text("Mostrar u ocultar opciones avanzadas")
+                        .clicked()
                         {
                             self.show_options_panel = !self.show_options_panel;
                         }
 
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Nativa")
-                                        .size(11.5_f32)
-                                        .color(TEXT_PRIMARY),
-                                )
-                                .fill(BG_CARD)
-                                .stroke(Stroke::new(1.0_f32, BORDER))
-                                .rounding(Rounding::same(5.0_f32)),
-                            )
-                            .on_hover_text("Restaurar resolución nativa (Ctrl+Alt+N)")
-                            .clicked()
+                        if Self::animated_button(
+                            ui,
+                            "hdr_native_btn",
+                            "Nativa",
+                            11.5_f32,
+                            false,
+                            false,
+                            true,
+                        )
+                        .on_hover_text("Restaurar resolución nativa (Ctrl+Alt+N)")
+                        .clicked()
                         {
                             self.trigger_restore_native();
                         }
@@ -472,27 +602,20 @@ impl AspectShiftApp {
 
             for (idx, cat) in PresetCategory::ALL.into_iter().enumerate() {
                 let is_sel = self.selected_category == cat;
-                let t = ui.ctx().animate_bool_with_time(
-                    Id::new(("cat_pill", idx)),
+                if Self::animated_button(
+                    ui,
+                    ("cat_tab", idx),
+                    cat.label(),
+                    11.5_f32,
+                    false,
                     is_sel,
-                    0.20_f32,
-                );
-
-                let fill = lerp_color(BG_CARD, BG_CARD_ACTIVE, t);
-                let stroke_col = lerp_color(BORDER, ACCENT, t);
-                let text_col = lerp_color(TEXT_MUTED, TEXT_PRIMARY, t);
-
-                let btn = egui::Button::new(
-                    RichText::new(cat.label())
-                        .size(11.5_f32)
-                        .color(text_col),
+                    true,
                 )
-                .fill(fill)
-                .stroke(Stroke::new(1.0_f32, stroke_col))
-                .rounding(Rounding::same(5.0_f32));
-
-                if ui.add(btn).clicked() {
+                .clicked()
+                    && !is_sel
+                {
                     self.selected_category = cat;
+                    self.category_changed_at = Instant::now();
                 }
             }
         });
@@ -512,231 +635,249 @@ impl AspectShiftApp {
         let bg = lerp_color(BG_DARK, BG_PANEL, ease);
         let stroke_col = lerp_color(BG_DARK, BORDER, ease);
 
-        Frame::none()
-            .fill(bg)
-            .stroke(Stroke::new(1.0_f32, stroke_col))
-            .rounding(Rounding::same(7.0_f32))
-            .inner_margin(Margin::symmetric(10.0_f32, 8.0_f32 * ease))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 6.0_f32);
+        ui.scope(|ui| {
+            ui.multiply_opacity(ease);
 
-                // Monitor y tasa de refresco
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Pantalla:").size(11.0_f32).color(TEXT_MUTED));
+            Frame::none()
+                .fill(bg)
+                .stroke(Stroke::new(1.0_f32, stroke_col))
+                .rounding(Rounding::same(7.0_f32))
+                .inner_margin(Margin::symmetric(10.0_f32, 8.0_f32 * ease))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 6.0_f32);
 
-                    if self.monitors.len() > 1 {
-                        let current_label = format!("Pantalla {}", self.selected_monitor + 1);
-                        egui::ComboBox::from_id_salt("monitor_selector")
-                            .width(105.0_f32)
-                            .selected_text(RichText::new(current_label).size(11.0_f32))
-                            .show_ui(ui, |ui| {
-                                for idx in 0..self.monitors.len() {
-                                    let label = self.monitors[idx].display_label(idx);
-                                    if ui
-                                        .selectable_label(self.selected_monitor == idx, label)
-                                        .clicked()
-                                    {
-                                        self.selected_monitor = idx;
+                    // Monitor y tasa de refresco
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Pantalla:").size(11.0_f32).color(TEXT_MUTED));
+
+                        if self.monitors.len() > 1 {
+                            let current_label = format!("Pantalla {}", self.selected_monitor + 1);
+                            egui::ComboBox::from_id_salt("monitor_selector")
+                                .width(105.0_f32)
+                                .selected_text(RichText::new(current_label).size(11.0_f32))
+                                .show_ui(ui, |ui| {
+                                    for idx in 0..self.monitors.len() {
+                                        let label = self.monitors[idx].display_label(idx);
+                                        if ui
+                                            .selectable_label(self.selected_monitor == idx, label)
+                                            .clicked()
+                                        {
+                                            self.selected_monitor = idx;
+                                        }
                                     }
+                                });
+                        }
+
+                        let hz_list = self
+                            .current_monitor()
+                            .map(|m| m.all_supported_hz.clone())
+                            .unwrap_or_else(|| vec![60]);
+                        let selected_hz_text = match self.selected_hz {
+                            None => "Hz: Auto".to_string(),
+                            Some(hz) => format!("{} Hz", hz),
+                        };
+                        egui::ComboBox::from_id_salt("hz_selector")
+                            .width(78.0_f32)
+                            .selected_text(RichText::new(selected_hz_text).size(11.0_f32))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.selected_hz, None, "Auto");
+                                for hz in hz_list {
+                                    ui.selectable_value(
+                                        &mut self.selected_hz,
+                                        Some(hz),
+                                        format!("{} Hz", hz),
+                                    );
                                 }
                             });
-                    }
 
-                    let hz_list = self
-                        .current_monitor()
-                        .map(|m| m.all_supported_hz.clone())
-                        .unwrap_or_else(|| vec![60]);
-                    let selected_hz_text = match self.selected_hz {
-                        None => "Hz: Auto".to_string(),
-                        Some(hz) => format!("{} Hz", hz),
-                    };
-                    egui::ComboBox::from_id_salt("hz_selector")
-                        .width(78.0_f32)
-                        .selected_text(RichText::new(selected_hz_text).size(11.0_f32))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.selected_hz, None, "Auto");
-                            for hz in hz_list {
-                                ui.selectable_value(
-                                    &mut self.selected_hz,
-                                    Some(hz),
-                                    format!("{} Hz", hz),
-                                );
-                            }
-                        });
-
-                    if ui
-                        .button(RichText::new("Actualizar").size(11.0_f32))
+                        if Self::animated_button(
+                            ui,
+                            "opt_refresh_btn",
+                            "Actualizar",
+                            11.0_f32,
+                            false,
+                            false,
+                            true,
+                        )
                         .on_hover_text("Recargar monitores y ventanas")
                         .clicked()
-                    {
-                        self.full_refresh_devices_and_windows();
-                    }
-                });
-
-                // Resolución personalizada
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new("Personalizada:")
-                            .size(11.0_f32)
-                            .color(TEXT_MUTED),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.custom_w_input)
-                            .desired_width(48.0_f32)
-                            .hint_text("1440"),
-                    );
-                    ui.label(RichText::new("×").size(11.5_f32).color(TEXT_DIM));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.custom_h_input)
-                            .desired_width(48.0_f32)
-                            .hint_text("1080"),
-                    );
-
-                    let parsed_pair = match (
-                        self.custom_w_input.trim().parse::<u32>(),
-                        self.custom_h_input.trim().parse::<u32>(),
-                    ) {
-                        (Ok(w), Ok(h))
-                            if (640..=7680).contains(&w) && (480..=4320).contains(&h) =>
                         {
-                            Some((w, h))
+                            self.full_refresh_devices_and_windows();
                         }
-                        _ => None,
-                    };
+                    });
 
-                    if ui
-                        .add_enabled(
-                            parsed_pair.is_some(),
-                            egui::Button::new(
-                                RichText::new("Aplicar").size(11.0_f32).color(Color32::WHITE),
-                            )
-                            .fill(ACCENT),
-                        )
-                        .clicked()
-                    {
-                        if let Some((w, h)) = parsed_pair {
-                            self.trigger_apply_resolution(w, h);
-                        }
-                    }
-
-                    if ui
-                        .add_enabled(
-                            parsed_pair.is_some(),
-                            egui::Button::new(
-                                RichText::new("Guardar")
-                                    .size(11.0_f32)
-                                    .color(TEXT_PRIMARY),
-                            )
-                            .fill(BG_CARD),
-                        )
-                        .clicked()
-                    {
-                        if let Some((w, h)) = parsed_pair {
-                            let tag = Some(format!("{} Personalizada", format_aspect_ratio(w, h)));
-                            self.config.add_custom_preset(w, h, tag);
-                            self.status_text = format!("Guardada {}×{}", w, h);
-                            self.status_kind = StatusKind::Success;
-                        }
-                    }
-                });
-
-                // Ajuste manual de ventana sin bordes (solo si el usuario elige una ventana)
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new("Ventana:")
-                            .size(11.0_f32)
-                            .color(TEXT_MUTED),
-                    );
-
-                    let selected_win_label = if self.selected_window_idx == 0 {
-                        "Seleccionar ventana...".to_string()
-                    } else if let Some(w) = self.candidate_windows.get(self.selected_window_idx - 1)
-                    {
-                        let mut s: String = w.title.chars().take(20).collect();
-                        if w.title.chars().count() > 20 {
-                            s.push('…');
-                        }
-                        s
-                    } else {
-                        "Seleccionar ventana...".to_string()
-                    };
-
-                    egui::ComboBox::from_id_salt("window_selector")
-                        .width(148.0_f32)
-                        .selected_text(RichText::new(selected_win_label).size(11.0_f32))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.selected_window_idx,
-                                0,
-                                "Ninguna (no modificar ventanas)",
-                            );
-                            for (i, w) in self.candidate_windows.iter().enumerate() {
-                                ui.selectable_value(
-                                    &mut self.selected_window_idx,
-                                    i + 1,
-                                    &w.title,
-                                );
-                            }
-                        });
-
-                    if ui
-                        .add_enabled(
-                            self.selected_window_idx > 0,
-                            egui::Button::new(
-                                RichText::new("Quitar bordes")
-                                    .size(11.0_f32)
-                                    .color(TEXT_PRIMARY),
-                            )
-                            .fill(BG_CARD),
-                        )
-                        .on_hover_text("Adapta únicamente la ventana seleccionada a su monitor actual")
-                        .clicked()
-                    {
-                        self.trigger_adjust_window(false);
-                    }
-                });
-
-                // Preferencias y guía
-                ui.horizontal_wrapped(|ui| {
-                    let mut force_stretch = self.config.force_gpu_stretch_flag;
-                    if ui
-                        .checkbox(
-                            &mut force_stretch,
-                            RichText::new("Escalado GPU").size(11.0_f32).color(TEXT_MUTED),
-                        )
-                        .changed()
-                    {
-                        self.config.force_gpu_stretch_flag = force_stretch;
-                        self.config.save();
-                    }
-
-                    let mut restore_exit = self.config.restore_native_on_exit;
-                    if ui
-                        .checkbox(
-                            &mut restore_exit,
-                            RichText::new("Restaurar al salir")
+                    // Resolución personalizada
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("Personalizada:")
                                 .size(11.0_f32)
                                 .color(TEXT_MUTED),
-                        )
-                        .changed()
-                    {
-                        self.config.restore_native_on_exit = restore_exit;
-                        self.config.save();
-                    }
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.custom_w_input)
+                                .desired_width(48.0_f32)
+                                .hint_text("1440"),
+                        );
+                        ui.label(RichText::new("×").size(11.5_f32).color(TEXT_DIM));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.custom_h_input)
+                                .desired_width(48.0_f32)
+                                .hint_text("1080"),
+                        );
 
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Guía").size(11.0_f32).color(TEXT_MUTED),
-                            )
-                            .fill(BG_CARD),
+                        let parsed_pair = match (
+                            self.custom_w_input.trim().parse::<u32>(),
+                            self.custom_h_input.trim().parse::<u32>(),
+                        ) {
+                            (Ok(w), Ok(h))
+                                if (640..=7680).contains(&w) && (480..=4320).contains(&h) =>
+                            {
+                                Some((w, h))
+                            }
+                            _ => None,
+                        };
+
+                        if Self::animated_button(
+                            ui,
+                            "opt_apply_custom",
+                            "Aplicar",
+                            11.0_f32,
+                            true,
+                            false,
+                            parsed_pair.is_some(),
                         )
                         .clicked()
-                    {
-                        self.show_guide_modal = !self.show_guide_modal;
-                    }
+                        {
+                            if let Some((w, h)) = parsed_pair {
+                                self.trigger_apply_resolution(w, h);
+                            }
+                        }
+
+                        if Self::animated_button(
+                            ui,
+                            "opt_save_custom",
+                            "Guardar",
+                            11.0_f32,
+                            false,
+                            false,
+                            parsed_pair.is_some(),
+                        )
+                        .clicked()
+                        {
+                            if let Some((w, h)) = parsed_pair {
+                                let tag =
+                                    Some(format!("{} Personalizada", format_aspect_ratio(w, h)));
+                                self.config.add_custom_preset(w, h, tag);
+                                self.status_text = format!("Guardada {}×{}", w, h);
+                                self.status_kind = StatusKind::Success;
+                            }
+                        }
+                    });
+
+                    // Ajuste manual de ventana sin bordes (solo si el usuario elige una ventana)
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("Ventana:")
+                                .size(11.0_f32)
+                                .color(TEXT_MUTED),
+                        );
+
+                        let selected_win_label = if self.selected_window_idx == 0 {
+                            "Seleccionar ventana...".to_string()
+                        } else if let Some(w) =
+                            self.candidate_windows.get(self.selected_window_idx - 1)
+                        {
+                            let mut s: String = w.title.chars().take(20).collect();
+                            if w.title.chars().count() > 20 {
+                                s.push('…');
+                            }
+                            s
+                        } else {
+                            "Seleccionar ventana...".to_string()
+                        };
+
+                        egui::ComboBox::from_id_salt("window_selector")
+                            .width(148.0_f32)
+                            .selected_text(RichText::new(selected_win_label).size(11.0_f32))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.selected_window_idx,
+                                    0,
+                                    "Ninguna (no modificar ventanas)",
+                                );
+                                for (i, w) in self.candidate_windows.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut self.selected_window_idx,
+                                        i + 1,
+                                        &w.title,
+                                    );
+                                }
+                            });
+
+                        if Self::animated_button(
+                            ui,
+                            "opt_borderless_btn",
+                            "Quitar bordes",
+                            11.0_f32,
+                            false,
+                            false,
+                            self.selected_window_idx > 0,
+                        )
+                        .on_hover_text(
+                            "Adapta únicamente la ventana seleccionada a su monitor actual",
+                        )
+                        .clicked()
+                        {
+                            self.trigger_adjust_window(false);
+                        }
+                    });
+
+                    // Preferencias y guía
+                    ui.horizontal_wrapped(|ui| {
+                        let mut force_stretch = self.config.force_gpu_stretch_flag;
+                        if ui
+                            .checkbox(
+                                &mut force_stretch,
+                                RichText::new("Escalado GPU")
+                                    .size(11.0_f32)
+                                    .color(TEXT_MUTED),
+                            )
+                            .changed()
+                        {
+                            self.config.force_gpu_stretch_flag = force_stretch;
+                            self.config.save();
+                        }
+
+                        let mut restore_exit = self.config.restore_native_on_exit;
+                        if ui
+                            .checkbox(
+                                &mut restore_exit,
+                                RichText::new("Restaurar al salir")
+                                    .size(11.0_f32)
+                                    .color(TEXT_MUTED),
+                            )
+                            .changed()
+                        {
+                            self.config.restore_native_on_exit = restore_exit;
+                            self.config.save();
+                        }
+
+                        if Self::animated_button(
+                            ui,
+                            "opt_guide_btn",
+                            "Guía",
+                            11.0_f32,
+                            false,
+                            self.show_guide_modal,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.show_guide_modal = !self.show_guide_modal;
+                        }
+                    });
                 });
-            });
+        });
 
         ui.add_space(6.0_f32 * ease);
     }
@@ -747,6 +888,16 @@ impl AspectShiftApp {
             .current_monitor()
             .map(|m| (m.current_mode.width, m.current_mode.height))
             .unwrap_or((0, 0));
+
+        // Suaviza la entrada de las tarjetas al cambiar de categoría
+        let elapsed_cat = self.category_changed_at.elapsed().as_secs_f32();
+        let cat_fade = if elapsed_cat < 0.20_f32 {
+            ui.ctx().request_repaint();
+            let t = (elapsed_cat / 0.20_f32).clamp(0.0_f32, 1.0_f32);
+            0.35_f32 + 0.65_f32 * (1.0_f32 - (1.0_f32 - t).powi(2))
+        } else {
+            1.0_f32
+        };
 
         let spacing = 8.0_f32;
         let avail_w = ui.available_width().max(120.0_f32);
@@ -763,165 +914,191 @@ impl AspectShiftApp {
         let mut action_toggle_fav: Option<(u32, u32)> = None;
         let mut action_delete_custom: Option<(u32, u32)> = None;
 
-        for row in presets.chunks(cols) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = spacing;
-                for preset in row {
-                    let is_active = active_mode == (preset.width, preset.height);
-                    let is_fav = self.config.is_favorite(preset.width, preset.height);
-                    let card_id = Id::new(("res_card", preset.width, preset.height));
+        ui.scope(|ui| {
+            ui.multiply_opacity(cat_fade);
 
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::click());
+            for row in presets.chunks(cols) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = spacing;
+                    for preset in row {
+                        let is_active = active_mode == (preset.width, preset.height);
+                        let is_fav = self.config.is_favorite(preset.width, preset.height);
+                        let card_id = Id::new(("res_card", preset.width, preset.height));
 
-                    let hover_t = ui.ctx().animate_bool_with_time(
-                        card_id.with("hover"),
-                        response.hovered(),
-                        0.20_f32,
-                    );
-                    let active_t = ui.ctx().animate_bool_with_time(
-                        card_id.with("active"),
-                        is_active,
-                        0.26_f32,
-                    );
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::new(card_w, card_h), Sense::click());
 
-                    // Elevación sutil al pasar el cursor
-                    let visual_rect = rect.translate(Vec2::new(0.0_f32, -1.5_f32 * hover_t));
+                        let hover_t = ui.ctx().animate_bool_with_time(
+                            card_id.with("hover"),
+                            response.hovered(),
+                            0.20_f32,
+                        );
+                        let active_t = ui.ctx().animate_bool_with_time(
+                            card_id.with("active"),
+                            is_active,
+                            0.26_f32,
+                        );
+                        let press_t = ui.ctx().animate_bool_with_time(
+                            card_id.with("press"),
+                            response.is_pointer_button_down_on(),
+                            0.10_f32,
+                        );
 
-                    let star_rect = Rect::from_min_size(
-                        Pos2::new(visual_rect.right() - 26.0_f32, visual_rect.top() + 5.0_f32),
-                        Vec2::new(20.0_f32, 20.0_f32),
-                    );
-                    let del_rect = if preset.is_custom {
-                        Some(Rect::from_min_size(
-                            Pos2::new(visual_rect.right() - 46.0_f32, visual_rect.top() + 5.0_f32),
-                            Vec2::new(18.0_f32, 20.0_f32),
-                        ))
-                    } else {
-                        None
-                    };
+                        // Elevación en hover y asentamiento táctil al pulsar
+                        let y_offset = -1.6_f32 * hover_t + 1.4_f32 * press_t;
+                        let visual_rect = rect.translate(Vec2::new(0.0_f32, y_offset));
 
-                    let pointer_pos = response
-                        .interact_pointer_pos()
-                        .or_else(|| ui.ctx().pointer_hover_pos());
-                    let star_hovered = pointer_pos.map(|p| star_rect.contains(p)).unwrap_or(false);
-                    let del_hovered = del_rect
-                        .and_then(|r| pointer_pos.map(|p| r.contains(p)))
-                        .unwrap_or(false);
-
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-                    }
-
-                    if response.clicked() {
-                        if star_hovered {
-                            action_toggle_fav = Some((preset.width, preset.height));
-                        } else if del_hovered {
-                            action_delete_custom = Some((preset.width, preset.height));
+                        let star_rect = Rect::from_min_size(
+                            Pos2::new(visual_rect.right() - 26.0_f32, visual_rect.top() + 5.0_f32),
+                            Vec2::new(20.0_f32, 20.0_f32),
+                        );
+                        let del_rect = if preset.is_custom {
+                            Some(Rect::from_min_size(
+                                Pos2::new(
+                                    visual_rect.right() - 46.0_f32,
+                                    visual_rect.top() + 5.0_f32,
+                                ),
+                                Vec2::new(18.0_f32, 20.0_f32),
+                            ))
                         } else {
-                            action_apply = Some((preset.width, preset.height));
+                            None
+                        };
+
+                        let pointer_pos = response
+                            .interact_pointer_pos()
+                            .or_else(|| ui.ctx().pointer_hover_pos());
+                        let star_hovered =
+                            pointer_pos.map(|p| star_rect.contains(p)).unwrap_or(false);
+                        let del_hovered = del_rect
+                            .and_then(|r| pointer_pos.map(|p| r.contains(p)))
+                            .unwrap_or(false);
+
+                        if response.hovered() {
+                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                         }
-                    }
 
-                    let painter = ui.painter_at(visual_rect.expand(2.0_f32));
-                    let bg_hover = lerp_color(BG_CARD, BG_CARD_HOVER, hover_t);
-                    let bg_fill = lerp_color(bg_hover, BG_CARD_ACTIVE, active_t);
+                        if response.clicked() {
+                            if star_hovered {
+                                action_toggle_fav = Some((preset.width, preset.height));
+                            } else if del_hovered {
+                                action_delete_custom = Some((preset.width, preset.height));
+                            } else {
+                                action_apply = Some((preset.width, preset.height));
+                            }
+                        }
 
-                    let border_hover = lerp_color(BORDER, BORDER_HOVER, hover_t);
-                    let border_col = lerp_color(border_hover, ACCENT, active_t);
-                    let border_w = 1.0_f32 + 0.5_f32 * active_t;
+                        let painter = ui.painter_at(visual_rect.expand(3.0_f32));
+                        let bg_hover = lerp_color(BG_CARD, BG_CARD_HOVER, hover_t);
+                        let mut bg_fill = lerp_color(bg_hover, BG_CARD_ACTIVE, active_t);
+                        if press_t > 0.01_f32 {
+                            bg_fill = lerp_color(bg_fill, BG_PANEL, 0.20_f32 * press_t);
+                        }
 
-                    painter.rect(
-                        visual_rect,
-                        Rounding::same(7.0_f32),
-                        bg_fill,
-                        Stroke::new(border_w, border_col),
-                    );
+                        let border_hover = lerp_color(BORDER, BORDER_HOVER, hover_t);
+                        let border_col = lerp_color(border_hover, ACCENT, active_t);
+                        let border_w = 1.0_f32 + 0.5_f32 * active_t;
 
-                    let res_label = format!("{} × {}", preset.width, preset.height);
-                    let title_size = if card_w < 135.0_f32 { 13.5_f32 } else { 15.0_f32 };
-                    painter.text(
-                        Pos2::new(visual_rect.left() + 10.0_f32, visual_rect.top() + 17.0_f32),
-                        Align2::LEFT_CENTER,
-                        res_label,
-                        FontId::new(title_size, FontFamily::Proportional),
-                        TEXT_PRIMARY,
-                    );
+                        painter.rect(
+                            visual_rect,
+                            Rounding::same(7.0_f32),
+                            bg_fill,
+                            Stroke::new(border_w, border_col),
+                        );
 
-                    let star_glyph = if is_fav { "★" } else { "☆" };
-                    let star_col = if is_fav {
-                        ACCENT_SOFT
-                    } else if star_hovered {
-                        TEXT_PRIMARY
-                    } else {
-                        lerp_color(Color32::TRANSPARENT, TEXT_DIM, hover_t)
-                    };
-                    painter.text(
-                        star_rect.center(),
-                        Align2::CENTER_CENTER,
-                        star_glyph,
-                        FontId::new(12.5_f32, FontFamily::Proportional),
-                        star_col,
-                    );
+                        let res_label = format!("{} × {}", preset.width, preset.height);
+                        let title_size = if card_w < 135.0_f32 { 13.5_f32 } else { 15.0_f32 };
+                        painter.text(
+                            Pos2::new(visual_rect.left() + 10.0_f32, visual_rect.top() + 17.0_f32),
+                            Align2::LEFT_CENTER,
+                            res_label,
+                            FontId::new(title_size, FontFamily::Proportional),
+                            TEXT_PRIMARY,
+                        );
 
-                    if let Some(drect) = del_rect {
-                        let dcol = if del_hovered {
-                            STATUS_WARN
+                        let star_glyph = if is_fav { "★" } else { "☆" };
+                        let star_col = if is_fav {
+                            ACCENT_SOFT
+                        } else if star_hovered {
+                            TEXT_PRIMARY
                         } else {
-                            lerp_color(TEXT_DIM, TEXT_MUTED, hover_t)
+                            lerp_color(Color32::TRANSPARENT, TEXT_DIM, hover_t)
                         };
                         painter.text(
-                            drect.center(),
+                            star_rect.center(),
                             Align2::CENTER_CENTER,
-                            "×",
-                            FontId::new(13.0_f32, FontFamily::Proportional),
-                            dcol,
+                            star_glyph,
+                            FontId::new(12.5_f32, FontFamily::Proportional),
+                            star_col,
                         );
+
+                        if let Some(drect) = del_rect {
+                            let dcol = if del_hovered {
+                                STATUS_WARN
+                            } else {
+                                lerp_color(TEXT_DIM, TEXT_MUTED, hover_t)
+                            };
+                            painter.text(
+                                drect.center(),
+                                Align2::CENTER_CENTER,
+                                "×",
+                                FontId::new(13.0_f32, FontFamily::Proportional),
+                                dcol,
+                            );
+                        }
+
+                        painter.text(
+                            Pos2::new(visual_rect.left() + 10.0_f32, visual_rect.top() + 37.0_f32),
+                            Align2::LEFT_CENTER,
+                            &preset.tag,
+                            FontId::new(10.5_f32, FontFamily::Proportional),
+                            TEXT_DIM,
+                        );
+
+                        let aspect_col = lerp_color(TEXT_MUTED, ACCENT_SOFT, active_t);
+                        painter.text(
+                            Pos2::new(
+                                visual_rect.right() - 10.0_f32,
+                                visual_rect.top() + 37.0_f32,
+                            ),
+                            Align2::RIGHT_CENTER,
+                            preset.aspect_label(),
+                            FontId::new(10.5_f32, FontFamily::Proportional),
+                            aspect_col,
+                        );
+
+                        // Barra inferior de proporción respecto a 16:9
+                        let bar_outer = Rect::from_min_max(
+                            Pos2::new(
+                                visual_rect.left() + 10.0_f32,
+                                visual_rect.bottom() - 9.0_f32,
+                            ),
+                            Pos2::new(
+                                visual_rect.right() - 10.0_f32,
+                                visual_rect.bottom() - 6.5_f32,
+                            ),
+                        );
+                        painter.rect_filled(
+                            bar_outer,
+                            Rounding::same(1.5_f32),
+                            Color32::from_rgb(20, 22, 28),
+                        );
+
+                        let base_ratio = preset.visual_bar_ratio();
+                        let anim_ratio =
+                            base_ratio + (1.0_f32 - base_ratio) * 0.05_f32 * hover_t;
+                        let inner_w = bar_outer.width() * anim_ratio;
+                        let bar_inner = Rect::from_min_size(
+                            Pos2::new(bar_outer.center().x - inner_w * 0.5_f32, bar_outer.top()),
+                            Vec2::new(inner_w, bar_outer.height()),
+                        );
+                        let bar_idle = lerp_color(TEXT_DIM, ACCENT_SOFT, hover_t);
+                        let bar_col = lerp_color(bar_idle, STATUS_OK, active_t);
+                        painter.rect_filled(bar_inner, Rounding::same(1.5_f32), bar_col);
                     }
-
-                    painter.text(
-                        Pos2::new(visual_rect.left() + 10.0_f32, visual_rect.top() + 37.0_f32),
-                        Align2::LEFT_CENTER,
-                        &preset.tag,
-                        FontId::new(10.5_f32, FontFamily::Proportional),
-                        TEXT_DIM,
-                    );
-
-                    let aspect_col = lerp_color(TEXT_MUTED, ACCENT_SOFT, active_t);
-                    painter.text(
-                        Pos2::new(visual_rect.right() - 10.0_f32, visual_rect.top() + 37.0_f32),
-                        Align2::RIGHT_CENTER,
-                        preset.aspect_label(),
-                        FontId::new(10.5_f32, FontFamily::Proportional),
-                        aspect_col,
-                    );
-
-                    // Barra inferior de proporción respecto a 16:9
-                    let bar_outer = Rect::from_min_max(
-                        Pos2::new(visual_rect.left() + 10.0_f32, visual_rect.bottom() - 9.0_f32),
-                        Pos2::new(visual_rect.right() - 10.0_f32, visual_rect.bottom() - 6.5_f32),
-                    );
-                    painter.rect_filled(
-                        bar_outer,
-                        Rounding::same(1.5_f32),
-                        Color32::from_rgb(20, 22, 28),
-                    );
-
-                    let base_ratio = preset.visual_bar_ratio();
-                    let anim_ratio =
-                        base_ratio + (1.0_f32 - base_ratio) * 0.04_f32 * hover_t;
-                    let inner_w = bar_outer.width() * anim_ratio;
-                    let bar_inner = Rect::from_min_size(
-                        Pos2::new(bar_outer.center().x - inner_w * 0.5_f32, bar_outer.top()),
-                        Vec2::new(inner_w, bar_outer.height()),
-                    );
-                    let bar_idle = lerp_color(TEXT_DIM, ACCENT_SOFT, hover_t);
-                    let bar_col = lerp_color(bar_idle, STATUS_OK, active_t);
-                    painter.rect_filled(bar_inner, Rounding::same(1.5_f32), bar_col);
-                }
-            });
-            ui.add_space(2.0_f32);
-        }
+                });
+                ui.add_space(2.0_f32);
+            }
+        });
 
         if let Some((w, h)) = action_toggle_fav {
             let added = self.config.toggle_favorite(w, h);
@@ -942,6 +1119,69 @@ impl AspectShiftApp {
         if let Some((w, h)) = action_apply {
             self.trigger_apply_resolution(w, h);
         }
+    }
+
+    /// Muestra una notificación flotante minimalista dentro de la ventana tras cambiar de resolución.
+    fn render_in_app_toast(&mut self, ctx: &egui::Context) {
+        let Some(toast) = &self.in_app_toast else {
+            return;
+        };
+
+        let elapsed = toast.started_at.elapsed().as_secs_f32();
+        let fade_in = 0.22_f32;
+        let hold = 1.75_f32;
+        let fade_out = 0.35_f32;
+        let total = fade_in + hold + fade_out;
+
+        if elapsed >= total {
+            self.in_app_toast = None;
+            return;
+        }
+
+        ctx.request_repaint();
+
+        let (alpha_f, y_slide) = if elapsed < fade_in {
+            let t = (elapsed / fade_in).clamp(0.0_f32, 1.0_f32);
+            let ease = 1.0_f32 - (1.0_f32 - t).powi(3);
+            (ease, (1.0_f32 - ease) * 10.0_f32)
+        } else if elapsed < fade_in + hold {
+            (1.0_f32, 0.0_f32)
+        } else {
+            let t = ((elapsed - fade_in - hold) / fade_out).clamp(0.0_f32, 1.0_f32);
+            let ease = t * t;
+            (1.0_f32 - ease, ease * 6.0_f32)
+        };
+
+        let dot_col = if toast.is_native { STATUS_OK } else { ACCENT };
+
+        egui::Area::new(Id::new("in_app_toast_overlay"))
+            .order(Order::Foreground)
+            .interactable(false)
+            .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0_f32, -36.0_f32 + y_slide))
+            .show(ctx, |ui| {
+                ui.multiply_opacity(alpha_f);
+                Frame::none()
+                    .fill(BG_PANEL)
+                    .stroke(Stroke::new(1.0_f32, BORDER_HOVER))
+                    .rounding(Rounding::same(16.0_f32))
+                    .inner_margin(Margin::symmetric(12.0_f32, 6.0_f32))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 7.0_f32;
+                            let (dot_rect, _) = ui.allocate_exact_size(
+                                Vec2::new(8.0_f32, 8.0_f32),
+                                Sense::hover(),
+                            );
+                            ui.painter().circle_filled(dot_rect.center(), 3.5_f32, dot_col);
+                            ui.label(
+                                RichText::new(&toast.text)
+                                    .size(11.5_f32)
+                                    .strong()
+                                    .color(TEXT_PRIMARY),
+                            );
+                        });
+                    });
+            });
     }
 
     fn render_footer(&self, ui: &mut Ui) {
@@ -1064,14 +1304,16 @@ impl AspectShiftApp {
 
                 ui.add_space(6.0_f32);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Cerrar").size(11.5_f32).color(Color32::WHITE),
-                            )
-                            .fill(ACCENT),
-                        )
-                        .clicked()
+                    if Self::animated_button(
+                        ui,
+                        "modal_close_btn",
+                        "Cerrar",
+                        11.5_f32,
+                        true,
+                        false,
+                        true,
+                    )
+                    .clicked()
                     {
                         self.show_guide_modal = false;
                     }
@@ -1137,6 +1379,7 @@ impl eframe::App for AspectShiftApp {
                     });
             });
 
+        self.render_in_app_toast(ctx);
         self.render_guide_modal(ctx);
     }
 

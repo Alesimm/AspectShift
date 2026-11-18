@@ -69,6 +69,7 @@ AspectShift/
 │   ├── app.rs               # Interfaz adaptable, tipografía, paleta y animaciones
 │   ├── display.rs           # Enumeración de monitores y cambio de resolución Win32
 │   ├── window_stretch.rs    # Utilidad opcional de ajuste sin bordes por ventana
+│   ├── toast.rs             # Notificación flotante minimalista en pantalla
 │   ├── hotkeys.rs           # Escucha de atajos globales en segundo plano
 │   ├── presets.rs           # Catálogo de resoluciones y cálculo de proporción
 │   └── config.rs            # Persistencia portable en aspectshift_config.json
