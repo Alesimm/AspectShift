@@ -1,6 +1,6 @@
 [package]
 name = "AspectShift"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 authors = ["Alexander Simpertigue"]
 description = "Utilidad nativa en Rust para cambiar resoluciones y relaciones de aspecto en Windows"

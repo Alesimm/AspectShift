@@ -13,6 +13,7 @@ use crate::display::{
     MonitorInfo,
 };
 use crate::hotkeys::{GlobalHotkeyListener, HotkeyAction};
+use crate::integration::{is_in_start_menu, register_in_start_menu, remove_from_start_menu};
 use crate::presets::{builtin_presets, format_aspect_ratio, PresetCategory, ResolutionPreset};
 use crate::toast::ScreenToast;
 use crate::updater::{apply_downloaded_update, ReleaseInfo, UpdateEvent, UpdateManager};
@@ -140,6 +141,7 @@ pub struct AspectShiftApp {
     update_dismissed: bool,
     update_checking: bool,
     update_downloading: bool,
+    in_start_menu: bool,
 
     logo_texture: Option<TextureHandle>,
     hotkey_listener: GlobalHotkeyListener,
@@ -214,6 +216,7 @@ impl AspectShiftApp {
             update_dismissed: false,
             update_checking: true,
             update_downloading: false,
+            in_start_menu: is_in_start_menu(),
             logo_texture,
             hotkey_listener,
         }
@@ -1040,6 +1043,43 @@ impl AspectShiftApp {
                             self.update_checking = true;
                             self.update_manager
                                 .check_for_updates(ui.ctx().clone(), true);
+                        }
+
+                        let start_menu_label = if self.in_start_menu {
+                            "Quitar de Inicio"
+                        } else {
+                            "Añadir a Inicio"
+                        };
+                        if Self::animated_button(
+                            ui,
+                            "opt_start_menu_btn",
+                            start_menu_label,
+                            11.0_f32,
+                            false,
+                            self.in_start_menu,
+                            true,
+                        )
+                        .on_hover_text(
+                            "Registra AspectShift en el Menú Inicio para que aparezca como Aplicación al buscar en Windows",
+                        )
+                        .clicked()
+                        {
+                            let res = if self.in_start_menu {
+                                remove_from_start_menu()
+                            } else {
+                                register_in_start_menu()
+                            };
+                            match res {
+                                Ok(msg) => {
+                                    self.in_start_menu = is_in_start_menu();
+                                    self.status_text = msg;
+                                    self.status_kind = StatusKind::Success;
+                                }
+                                Err(err) => {
+                                    self.status_text = err;
+                                    self.status_kind = StatusKind::Warning;
+                                }
+                            }
                         }
 
                         ui.label(

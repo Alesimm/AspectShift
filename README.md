@@ -74,6 +74,7 @@ AspectShift/
 │   ├── window_stretch.rs    # Utilidad opcional de ajuste sin bordes por ventana
 │   ├── toast.rs             # Notificación flotante minimalista en pantalla
 │   ├── updater.rs           # Comprobación y renovación automática vía WinHTTP
+│   ├── integration.rs       # Registro de acceso directo como aplicación en Menú Inicio
 │   ├── hotkeys.rs           # Escucha de atajos globales en segundo plano
 │   ├── presets.rs           # Catálogo de resoluciones y cálculo de proporción
 │   └── config.rs            # Persistencia portable en aspectshift_config.json

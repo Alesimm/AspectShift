@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod display;
 mod hotkeys;
+mod integration;
 mod presets;
 mod toast;
 mod updater;
@@ -44,6 +45,10 @@ fn enable_dark_titlebar_by_title(title: &str) {
 fn main() -> eframe::Result<()> {
     // Modo de diagnóstico rápido para comprobar monitores detectados desde consola o pruebas.
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--register-start-menu") {
+        let _ = integration::register_in_start_menu();
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--verify") {
         let monitors = display::enumerate_monitors();
         let windows = window_stretch::scan_candidate_windows();
