@@ -27,19 +27,30 @@ pub enum HotkeyAction {
 /// Escucha eventos WM_HOTKEY en un hilo dedicado con consumo nulo en espera.
 pub struct GlobalHotkeyListener {
     rx: Receiver<HotkeyAction>,
+    pub conflicts: Vec<&'static str>,
 }
 
 impl GlobalHotkeyListener {
     pub fn start(ctx: egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
+        let (status_tx, status_rx) = mpsc::channel();
 
         thread::Builder::new()
             .name("aspectshift-hotkeys".to_string())
             .spawn(move || unsafe {
                 let mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
-                let _ = RegisterHotKey(null_mut(), HOTKEY_ID_STRETCH, mods, VK_S);
-                let _ = RegisterHotKey(null_mut(), HOTKEY_ID_NATIVE, mods, VK_N);
-                let _ = RegisterHotKey(null_mut(), HOTKEY_ID_BORDERLESS, mods, VK_B);
+                let mut failed = Vec::new();
+
+                if RegisterHotKey(null_mut(), HOTKEY_ID_STRETCH, mods, VK_S) == 0 {
+                    failed.push("Ctrl+Alt+S");
+                }
+                if RegisterHotKey(null_mut(), HOTKEY_ID_NATIVE, mods, VK_N) == 0 {
+                    failed.push("Ctrl+Alt+N");
+                }
+                if RegisterHotKey(null_mut(), HOTKEY_ID_BORDERLESS, mods, VK_B) == 0 {
+                    failed.push("Ctrl+Alt+B");
+                }
+                let _ = status_tx.send(failed);
 
                 let mut msg: MSG = zeroed();
                 while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -63,7 +74,8 @@ impl GlobalHotkeyListener {
             })
             .ok();
 
-        Self { rx }
+        let conflicts = status_rx.recv().unwrap_or_default();
+        Self { rx, conflicts }
     }
 
     pub fn poll(&self) -> Option<HotkeyAction> {

@@ -22,6 +22,8 @@ pub struct AppConfig {
     pub last_stretch_res: (u32, u32),
     pub force_gpu_stretch_flag: bool,
     pub restore_native_on_exit: bool,
+    pub always_on_top: bool,
+    pub confirm_resolution_change: bool,
 }
 
 impl Default for AppConfig {
@@ -42,6 +44,8 @@ impl Default for AppConfig {
             last_stretch_res: (1440, 1080),
             force_gpu_stretch_flag: true,
             restore_native_on_exit: false,
+            always_on_top: false,
+            confirm_resolution_change: false,
         }
     }
 }

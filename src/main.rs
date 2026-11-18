@@ -73,12 +73,16 @@ fn main() -> eframe::Result<()> {
     };
 
     let window_title = "AspectShift";
-    let viewport = egui::ViewportBuilder::default()
+    let config = config::AppConfig::load();
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title(window_title)
         .with_app_id("AspectShift")
         .with_inner_size([520.0, 440.0])
         .with_min_inner_size([340.0, 340.0])
         .with_icon(std::sync::Arc::new(icon_data));
+    if config.always_on_top {
+        viewport = viewport.with_always_on_top();
+    }
 
     let native_options = eframe::NativeOptions {
         viewport,

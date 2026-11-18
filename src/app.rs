@@ -1,14 +1,16 @@
+use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
 use egui::{
     Align, Align2, Color32, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Frame, Id,
-    Key, Layout, Margin, Order, Pos2, Rect, RichText, Rounding, ScrollArea, Sense, Stroke,
-    TextureHandle, TextureOptions, Ui, Vec2,
+    Key, Layout, Margin, Order, Pos2, Rect, RichText, Rounding, ScrollArea, Sense, Shape, Stroke,
+    TextureHandle, TextureOptions, Ui, Vec2, ViewportCommand, WindowLevel,
 };
 
 use crate::config::AppConfig;
 use crate::display::{
-    apply_resolution, enumerate_monitors, query_current_mode, restore_native, MonitorInfo,
+    apply_resolution, enumerate_monitors, query_current_mode, restore_native, DisplayMode,
+    MonitorInfo,
 };
 use crate::hotkeys::{GlobalHotkeyListener, HotkeyAction};
 use crate::presets::{builtin_presets, format_aspect_ratio, PresetCategory, ResolutionPreset};
@@ -37,6 +39,8 @@ const TEXT_DIM: Color32 = Color32::from_rgb(99, 106, 117);
 const BORDER: Color32 = Color32::from_rgb(40, 44, 53);
 const BORDER_HOVER: Color32 = Color32::from_rgb(68, 76, 94);
 
+const SAFE_CONFIRM_SECONDS: f32 = 12.0;
+
 /// Interpola suavemente entre dos colores para animaciones fluidas.
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0_f32, 1.0_f32);
@@ -49,6 +53,46 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
+/// Dibuja una estrella vectorial de 5 puntas sin depender de fuentes externas.
+fn draw_star(painter: &egui::Painter, center: Pos2, radius: f32, filled: bool, color: Color32) {
+    let inner = radius * 0.44_f32;
+    let mut pts = Vec::with_capacity(10);
+    for i in 0..10 {
+        let angle = -TAU * 0.25_f32 + (i as f32) * (TAU / 10.0_f32);
+        let r = if i % 2 == 0 { radius } else { inner };
+        pts.push(Pos2::new(
+            center.x + r * angle.cos(),
+            center.y + r * angle.sin(),
+        ));
+    }
+
+    if filled {
+        painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
+    } else {
+        pts.push(pts[0]);
+        painter.add(Shape::line(pts, Stroke::new(1.1_f32, color)));
+    }
+}
+
+/// Dibuja una equis limpia para eliminar presets personalizados.
+fn draw_cross(painter: &egui::Painter, center: Pos2, half: f32, color: Color32) {
+    let stroke = Stroke::new(1.3_f32, color);
+    painter.line_segment(
+        [
+            Pos2::new(center.x - half, center.y - half),
+            Pos2::new(center.x + half, center.y + half),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(center.x + half, center.y - half),
+            Pos2::new(center.x - half, center.y + half),
+        ],
+        stroke,
+    );
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusKind {
     Ready,
@@ -57,9 +101,9 @@ enum StatusKind {
     Error,
 }
 
-struct InAppToast {
-    text: String,
-    is_native: bool,
+struct PendingConfirmation {
+    device_name: String,
+    previous_mode: DisplayMode,
     started_at: Instant,
 }
 
@@ -87,7 +131,7 @@ pub struct AspectShiftApp {
     show_guide_modal: bool,
     last_mode_poll: Instant,
 
-    in_app_toast: Option<InAppToast>,
+    pending_confirm: Option<PendingConfirmation>,
     screen_toast: ScreenToast,
 
     logo_texture: Option<TextureHandle>,
@@ -114,16 +158,27 @@ impl AspectShiftApp {
             None
         };
 
-        let status_text = if let Some(m) = monitors.first() {
-            format!(
-                "{} × {} @ {} Hz",
-                m.current_mode.width, m.current_mode.height, m.current_mode.hz
+        let hotkey_listener = GlobalHotkeyListener::start(cc.egui_ctx.clone());
+        let (status_text, status_kind) = if !hotkey_listener.conflicts.is_empty() {
+            (
+                format!(
+                    "Atajo ocupado por otra app: {}",
+                    hotkey_listener.conflicts.join(", ")
+                ),
+                StatusKind::Warning,
+            )
+        } else if let Some(m) = monitors.first() {
+            (
+                format!(
+                    "{} × {} @ {} Hz",
+                    m.current_mode.width, m.current_mode.height, m.current_mode.hz
+                ),
+                StatusKind::Ready,
             )
         } else {
-            "Listo".to_string()
+            ("Listo".to_string(), StatusKind::Ready)
         };
 
-        let hotkey_listener = GlobalHotkeyListener::start(cc.egui_ctx.clone());
         let screen_toast = ScreenToast::new();
 
         Self {
@@ -139,41 +194,37 @@ impl AspectShiftApp {
             candidate_windows,
             selected_window_idx: 0,
             status_text,
-            status_kind: StatusKind::Ready,
+            status_kind,
             show_options_panel: false,
             show_guide_modal: false,
             last_mode_poll: Instant::now(),
-            in_app_toast: None,
+            pending_confirm: None,
             screen_toast,
             logo_texture,
             hotkey_listener,
         }
     }
 
-    /// Carga la tipografía nativa de Windows (Segoe UI y Consolas) con respaldo seguro.
+    /// Carga únicamente Segoe UI desde Windows (con respaldo a Arial) para ahorrar memoria y espacio.
     fn configure_fonts(ctx: &egui::Context) {
         let mut fonts = FontDefinitions::default();
+        let font_bytes = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf")
+            .or_else(|_| std::fs::read(r"C:\Windows\Fonts\arial.ttf"));
 
-        if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf") {
+        if let Ok(bytes) = font_bytes {
             fonts
                 .font_data
-                .insert("segoe_ui".to_owned(), FontData::from_owned(bytes));
+                .insert("ui_sans".to_owned(), FontData::from_owned(bytes));
             fonts
                 .families
                 .entry(FontFamily::Proportional)
                 .or_default()
-                .insert(0, "segoe_ui".to_owned());
-        }
-
-        if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\consola.ttf") {
-            fonts
-                .font_data
-                .insert("consolas".to_owned(), FontData::from_owned(bytes));
+                .insert(0, "ui_sans".to_owned());
             fonts
                 .families
                 .entry(FontFamily::Monospace)
                 .or_default()
-                .insert(0, "consolas".to_owned());
+                .insert(0, "ui_sans".to_owned());
         }
 
         ctx.set_fonts(fonts);
@@ -346,22 +397,12 @@ impl AspectShiftApp {
         }
     }
 
-    fn notify_resolution_changed(
-        &mut self,
-        mode: crate::display::DisplayMode,
-        is_native: bool,
-    ) {
+    fn notify_resolution_changed(&self, mode: DisplayMode, is_native: bool) {
         let label = if is_native {
             format!("Nativa · {} × {} · {} Hz", mode.width, mode.height, mode.hz)
         } else {
             format!("{} × {} · {} Hz", mode.width, mode.height, mode.hz)
         };
-
-        self.in_app_toast = Some(InAppToast {
-            text: label.clone(),
-            is_native,
-            started_at: Instant::now(),
-        });
         self.screen_toast
             .show(mode.pos_x, mode.pos_y, mode.width, label, is_native);
     }
@@ -374,6 +415,7 @@ impl AspectShiftApp {
             return;
         };
 
+        let previous_mode = mon.current_mode;
         let target_hz = self.selected_hz.or(Some(mon.current_mode.hz));
         match apply_resolution(
             &mon.device_name,
@@ -393,6 +435,19 @@ impl AspectShiftApp {
                     self.config.save();
                 }
 
+                if self.config.confirm_resolution_change
+                    && (previous_mode.width != res.applied_mode.width
+                        || previous_mode.height != res.applied_mode.height)
+                {
+                    self.pending_confirm = Some(PendingConfirmation {
+                        device_name: mon.device_name,
+                        previous_mode,
+                        started_at: Instant::now(),
+                    });
+                } else {
+                    self.pending_confirm = None;
+                }
+
                 self.notify_resolution_changed(res.applied_mode, is_native_ratio);
                 self.status_text = res.message;
                 self.status_kind = StatusKind::Success;
@@ -405,6 +460,7 @@ impl AspectShiftApp {
     }
 
     fn trigger_restore_native(&mut self) {
+        self.pending_confirm = None;
         let Some(mon) = self.current_monitor().cloned() else {
             return;
         };
@@ -420,6 +476,40 @@ impl AspectShiftApp {
             }
             Err(err_msg) => {
                 self.status_text = err_msg;
+                self.status_kind = StatusKind::Error;
+            }
+        }
+    }
+
+    fn revert_pending_confirmation(&mut self) {
+        let Some(pending) = self.pending_confirm.take() else {
+            return;
+        };
+        let prev = pending.previous_mode;
+        match apply_resolution(
+            &pending.device_name,
+            prev.width,
+            prev.height,
+            Some(prev.hz),
+            false,
+        ) {
+            Ok(res) => {
+                if let Some(m) = self
+                    .monitors
+                    .iter_mut()
+                    .find(|m| m.device_name == pending.device_name)
+                {
+                    m.current_mode = res.applied_mode;
+                }
+                self.notify_resolution_changed(res.applied_mode, false);
+                self.status_text = format!(
+                    "Revertida automáticamente a {} × {} @ {} Hz",
+                    res.applied_mode.width, res.applied_mode.height, res.applied_mode.hz
+                );
+                self.status_kind = StatusKind::Warning;
+            }
+            Err(err) => {
+                self.status_text = err;
                 self.status_kind = StatusKind::Error;
             }
         }
@@ -706,20 +796,20 @@ impl AspectShiftApp {
                         }
                     });
 
-                    // Resolución personalizada
+                    // Resolución personalizada (soporta Enter para aplicar rápido)
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new("Personalizada:")
                                 .size(11.0_f32)
                                 .color(TEXT_MUTED),
                         );
-                        ui.add(
+                        let w_resp = ui.add(
                             egui::TextEdit::singleline(&mut self.custom_w_input)
                                 .desired_width(48.0_f32)
                                 .hint_text("1440"),
                         );
                         ui.label(RichText::new("×").size(11.5_f32).color(TEXT_DIM));
-                        ui.add(
+                        let h_resp = ui.add(
                             egui::TextEdit::singleline(&mut self.custom_h_input)
                                 .desired_width(48.0_f32)
                                 .hint_text("1080"),
@@ -737,16 +827,20 @@ impl AspectShiftApp {
                             _ => None,
                         };
 
-                        if Self::animated_button(
-                            ui,
-                            "opt_apply_custom",
-                            "Aplicar",
-                            11.0_f32,
-                            true,
-                            false,
-                            parsed_pair.is_some(),
-                        )
-                        .clicked()
+                        let enter_pressed = (w_resp.lost_focus() || h_resp.lost_focus())
+                            && ui.input(|i| i.key_pressed(Key::Enter));
+
+                        if (enter_pressed && parsed_pair.is_some())
+                            || Self::animated_button(
+                                ui,
+                                "opt_apply_custom",
+                                "Aplicar",
+                                11.0_f32,
+                                true,
+                               false,
+                                parsed_pair.is_some(),
+                            )
+                            .clicked()
                         {
                             if let Some((w, h)) = parsed_pair {
                                 self.trigger_apply_resolution(w, h);
@@ -774,7 +868,7 @@ impl AspectShiftApp {
                         }
                     });
 
-                    // Ajuste manual de ventana sin bordes (solo si el usuario elige una ventana)
+                    // Ajuste manual de ventana sin bordes
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
                             RichText::new("Ventana:")
@@ -862,6 +956,43 @@ impl AspectShiftApp {
                             self.config.save();
                         }
 
+                        let mut always_top = self.config.always_on_top;
+                        if ui
+                            .checkbox(
+                                &mut always_top,
+                                RichText::new("Siempre visible")
+                                    .size(11.0_f32)
+                                    .color(TEXT_MUTED),
+                            )
+                            .changed()
+                        {
+                            self.config.always_on_top = always_top;
+                            self.config.save();
+                            let level = if always_top {
+                                WindowLevel::AlwaysOnTop
+                            } else {
+                                WindowLevel::Normal
+                            };
+                            ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(level));
+                        }
+
+                        let mut confirm_safe = self.config.confirm_resolution_change;
+                        if ui
+                            .checkbox(
+                                &mut confirm_safe,
+                                RichText::new("Confirmar cambio")
+                                    .size(11.0_f32)
+                                    .color(TEXT_MUTED),
+                            )
+                            .on_hover_text(
+                                "Si la pantalla no se ve bien tras cambiar, revierte automáticamente en 12 segundos",
+                            )
+                            .changed()
+                        {
+                            self.config.confirm_resolution_change = confirm_safe;
+                            self.config.save();
+                        }
+
                         if Self::animated_button(
                             ui,
                             "opt_guide_btn",
@@ -923,6 +1054,13 @@ impl AspectShiftApp {
                     for preset in row {
                         let is_active = active_mode == (preset.width, preset.height);
                         let is_fav = self.config.is_favorite(preset.width, preset.height);
+                        let is_driver_ready = self
+                            .current_monitor()
+                            .map(|m| {
+                                m.supported_resolutions
+                                    .contains(&(preset.width, preset.height))
+                            })
+                            .unwrap_or(true);
                         let card_id = Id::new(("res_card", preset.width, preset.height));
 
                         let (rect, response) =
@@ -949,16 +1087,16 @@ impl AspectShiftApp {
                         let visual_rect = rect.translate(Vec2::new(0.0_f32, y_offset));
 
                         let star_rect = Rect::from_min_size(
-                            Pos2::new(visual_rect.right() - 26.0_f32, visual_rect.top() + 5.0_f32),
-                            Vec2::new(20.0_f32, 20.0_f32),
+                            Pos2::new(visual_rect.right() - 25.0_f32, visual_rect.top() + 6.0_f32),
+                            Vec2::new(18.0_f32, 18.0_f32),
                         );
                         let del_rect = if preset.is_custom {
                             Some(Rect::from_min_size(
                                 Pos2::new(
-                                    visual_rect.right() - 46.0_f32,
-                                    visual_rect.top() + 5.0_f32,
+                                    visual_rect.right() - 45.0_f32,
+                                    visual_rect.top() + 6.0_f32,
                                 ),
-                                Vec2::new(18.0_f32, 20.0_f32),
+                                Vec2::new(18.0_f32, 18.0_f32),
                             ))
                         } else {
                             None
@@ -1015,7 +1153,6 @@ impl AspectShiftApp {
                             TEXT_PRIMARY,
                         );
 
-                        let star_glyph = if is_fav { "★" } else { "☆" };
                         let star_col = if is_fav {
                             ACCENT_SOFT
                         } else if star_hovered {
@@ -1023,13 +1160,9 @@ impl AspectShiftApp {
                         } else {
                             lerp_color(Color32::TRANSPARENT, TEXT_DIM, hover_t)
                         };
-                        painter.text(
-                            star_rect.center(),
-                            Align2::CENTER_CENTER,
-                            star_glyph,
-                            FontId::new(12.5_f32, FontFamily::Proportional),
-                            star_col,
-                        );
+                        if is_fav || hover_t > 0.05_f32 {
+                            draw_star(&painter, star_rect.center(), 5.0_f32, is_fav, star_col);
+                        }
 
                         if let Some(drect) = del_rect {
                             let dcol = if del_hovered {
@@ -1037,13 +1170,7 @@ impl AspectShiftApp {
                             } else {
                                 lerp_color(TEXT_DIM, TEXT_MUTED, hover_t)
                             };
-                            painter.text(
-                                drect.center(),
-                                Align2::CENTER_CENTER,
-                                "×",
-                                FontId::new(13.0_f32, FontFamily::Proportional),
-                                dcol,
-                            );
+                            draw_cross(&painter, drect.center(), 3.6_f32, dcol);
                         }
 
                         painter.text(
@@ -1094,6 +1221,13 @@ impl AspectShiftApp {
                         let bar_idle = lerp_color(TEXT_DIM, ACCENT_SOFT, hover_t);
                         let bar_col = lerp_color(bar_idle, STATUS_OK, active_t);
                         painter.rect_filled(bar_inner, Rounding::same(1.5_f32), bar_col);
+
+                        let tip = if is_driver_ready {
+                            "Lista en el controlador gráfico — clic para aplicar"
+                        } else {
+                            "No registrada de fábrica — puede requerir crearla en el panel GPU"
+                        };
+                        response.on_hover_text(tip);
                     }
                 });
                 ui.add_space(2.0_f32);
@@ -1119,69 +1253,6 @@ impl AspectShiftApp {
         if let Some((w, h)) = action_apply {
             self.trigger_apply_resolution(w, h);
         }
-    }
-
-    /// Muestra una notificación flotante minimalista dentro de la ventana tras cambiar de resolución.
-    fn render_in_app_toast(&mut self, ctx: &egui::Context) {
-        let Some(toast) = &self.in_app_toast else {
-            return;
-        };
-
-        let elapsed = toast.started_at.elapsed().as_secs_f32();
-        let fade_in = 0.22_f32;
-        let hold = 1.75_f32;
-        let fade_out = 0.35_f32;
-        let total = fade_in + hold + fade_out;
-
-        if elapsed >= total {
-            self.in_app_toast = None;
-            return;
-        }
-
-        ctx.request_repaint();
-
-        let (alpha_f, y_slide) = if elapsed < fade_in {
-            let t = (elapsed / fade_in).clamp(0.0_f32, 1.0_f32);
-            let ease = 1.0_f32 - (1.0_f32 - t).powi(3);
-            (ease, (1.0_f32 - ease) * 10.0_f32)
-        } else if elapsed < fade_in + hold {
-            (1.0_f32, 0.0_f32)
-        } else {
-            let t = ((elapsed - fade_in - hold) / fade_out).clamp(0.0_f32, 1.0_f32);
-            let ease = t * t;
-            (1.0_f32 - ease, ease * 6.0_f32)
-        };
-
-        let dot_col = if toast.is_native { STATUS_OK } else { ACCENT };
-
-        egui::Area::new(Id::new("in_app_toast_overlay"))
-            .order(Order::Foreground)
-            .interactable(false)
-            .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0_f32, -36.0_f32 + y_slide))
-            .show(ctx, |ui| {
-                ui.multiply_opacity(alpha_f);
-                Frame::none()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, BORDER_HOVER))
-                    .rounding(Rounding::same(16.0_f32))
-                    .inner_margin(Margin::symmetric(12.0_f32, 6.0_f32))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 7.0_f32;
-                            let (dot_rect, _) = ui.allocate_exact_size(
-                                Vec2::new(8.0_f32, 8.0_f32),
-                                Sense::hover(),
-                            );
-                            ui.painter().circle_filled(dot_rect.center(), 3.5_f32, dot_col);
-                            ui.label(
-                                RichText::new(&toast.text)
-                                    .size(11.5_f32)
-                                    .strong()
-                                    .color(TEXT_PRIMARY),
-                            );
-                        });
-                    });
-            });
     }
 
     fn render_footer(&self, ui: &mut Ui) {
@@ -1223,6 +1294,99 @@ impl AspectShiftApp {
                     }
                 });
             });
+    }
+
+    fn render_confirm_modal(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.pending_confirm else {
+            return;
+        };
+
+        let elapsed = pending.started_at.elapsed().as_secs_f32();
+        if elapsed >= SAFE_CONFIRM_SECONDS {
+            self.revert_pending_confirmation();
+            return;
+        }
+
+        ctx.request_repaint();
+        let remaining = (SAFE_CONFIRM_SECONDS - elapsed).ceil() as u32;
+
+        egui::Area::new(Id::new("confirm_modal_backdrop"))
+            .order(Order::Foreground)
+            .fixed_pos(Pos2::ZERO)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.painter().rect_filled(
+                    screen,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 175),
+                );
+            });
+
+        let modal_w = (ctx.screen_rect().width() - 32.0_f32).clamp(260.0_f32, 340.0_f32);
+        let mut keep_clicked = false;
+        let mut revert_clicked = false;
+
+        egui::Window::new("Confirmar cambio")
+            .order(Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(modal_w, 118.0_f32))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0_f32;
+                ui.label(
+                    RichText::new("¿Deseas conservar la resolución actual?")
+                        .size(12.5_f32)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Se restaurará la anterior automáticamente en {} s.",
+                        remaining
+                    ))
+                    .size(11.5_f32)
+                    .color(TEXT_MUTED),
+                );
+
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if Self::animated_button(
+                            ui,
+                            "confirm_keep_btn",
+                            "Conservar",
+                            11.5_f32,
+                            true,
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            keep_clicked = true;
+                        }
+
+                        if Self::animated_button(
+                            ui,
+                            "confirm_revert_btn",
+                            "Revertir",
+                            11.5_f32,
+                            false,
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            revert_clicked = true;
+                        }
+                    });
+                });
+            });
+
+        if keep_clicked {
+            self.pending_confirm = None;
+        } else if revert_clicked {
+            self.revert_pending_confirmation();
+        }
     }
 
     fn render_guide_modal(&mut self, ctx: &egui::Context) {
@@ -1344,8 +1508,12 @@ impl eframe::App for AspectShiftApp {
             self.last_mode_poll = Instant::now();
         }
 
-        if ctx.input(|i| i.key_pressed(Key::Escape)) && self.show_guide_modal {
-            self.show_guide_modal = false;
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if self.pending_confirm.is_some() {
+                self.revert_pending_confirmation();
+            } else if self.show_guide_modal {
+                self.show_guide_modal = false;
+            }
         }
 
         egui::TopBottomPanel::top("header_panel")
@@ -1379,7 +1547,7 @@ impl eframe::App for AspectShiftApp {
                     });
             });
 
-        self.render_in_app_toast(ctx);
+        self.render_confirm_modal(ctx);
         self.render_guide_modal(ctx);
     }
 
