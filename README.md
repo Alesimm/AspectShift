@@ -27,7 +27,7 @@ La idea nació de querer contar con una herramienta ligera, rápida y portable p
 
 - **Cambio directo por monitor**: Llama a `ChangeDisplaySettingsExW` y `EnumDisplaySettingsExW` únicamente sobre la pantalla seleccionada, preservando su posición en configuraciones multipantalla sin mover ni alterar ventanas en otros monitores.
 - **Interfaz minimalista y adaptable**: Cuadrícula responsive desde ventanas compactas (`340×340`) hasta escritorios amplios, con tipografía nativa del sistema, transiciones suaves y un panel desplegable **Opciones** para mantener la pantalla principal despejada.
-- **100% portable**: Un único archivo ejecutable (`AspectShift.exe`, ~1.9 MB) sin instaladores ni dependencias externas. Guarda tus resoluciones favoritas y personalizadas en `aspectshift_config.json`.
+- **100% portable**: Un único archivo ejecutable (`AspectShift.exe`, ~1.9 MB) sin instaladores ni dependencias externas. Guarda tus resoluciones favoritas y personalizadas en `%LOCALAPPDATA%\AspectShift\aspectshift_config.json` para mantener limpio el Escritorio.
 - **Soporte multipantalla y tasas de refresco (`Hz`)**: Detecta pantallas conectadas, resolución nativa y frecuencias registradas por el controlador gráfico.
 - **Confirmación de seguridad opcional y ventana siempre visible**: Desde **Opciones** puedes activar *Confirmar cambio* (revierte automáticamente tras 12 segundos si no confirmas) o mantener la ventana *Siempre visible* sobre otras aplicaciones.
 - **Aviso flotante en pantalla adaptado a DPI**: Muestra brevemente la resolución aplicada en la parte superior del monitor correspondiente sin robar foco ni bloquear clics.
@@ -77,7 +77,7 @@ AspectShift/
 │   ├── integration.rs       # Registro de acceso directo como aplicación en Menú Inicio
 │   ├── hotkeys.rs           # Escucha de atajos globales en segundo plano
 │   ├── presets.rs           # Catálogo de resoluciones y cálculo de proporción
-│   └── config.rs            # Persistencia portable en aspectshift_config.json
+│   └── config.rs            # Persistencia en %LOCALAPPDATA%\AspectShift\aspectshift_config.json
 ├── build.rs                 # Incrustación del icono y metadatos en el binario
 ├── Cargo.toml               # Manifiesto y dependencias de Rust
 └── LICENSE                  # Licencia MIT

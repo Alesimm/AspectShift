@@ -51,29 +51,21 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Resuelve la ruta del archivo JSON junto al ejecutable o en `%LOCALAPPDATA%`.
+    /// Resuelve la ruta del archivo JSON dentro de `%LOCALAPPDATA%\AspectShift` para no ensuciar el Escritorio.
     pub fn config_path() -> PathBuf {
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(dir) = exe_path.parent() {
-                let candidate = dir.join("aspectshift_config.json");
-                if candidate.exists() {
-                    return candidate;
-                }
-                let probe = dir.join(".aspectshift_write_probe");
-                if fs::write(&probe, b"ok").is_ok() {
-                    let _ = fs::remove_file(&probe);
-                    return candidate;
-                }
-            }
-        }
-
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
             let dir = PathBuf::from(local_app_data).join("AspectShift");
             let _ = fs::create_dir_all(&dir);
             return dir.join("aspectshift_config.json");
         }
 
-        PathBuf::from("aspectshift_config.json")
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            let dir = PathBuf::from(app_data).join("AspectShift");
+            let _ = fs::create_dir_all(&dir);
+            return dir.join("aspectshift_config.json");
+        }
+
+        std::env::temp_dir().join("aspectshift_config.json")
     }
 
     /// Carga la configuración desde disco o devuelve los valores predeterminados.
