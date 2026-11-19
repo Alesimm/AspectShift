@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod custom_res;
 mod display;
 mod hotkeys;
 mod integration;

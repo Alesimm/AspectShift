@@ -29,6 +29,7 @@ La idea nació de querer contar con una herramienta ligera, rápida y portable p
 - **Interfaz minimalista y adaptable**: Cuadrícula responsive desde ventanas compactas (`340×340`) hasta escritorios amplios, con tipografía nativa del sistema, transiciones suaves y un panel desplegable **Opciones** para mantener la pantalla principal despejada.
 - **100% portable**: Un único archivo ejecutable (`AspectShift.exe`, ~1.9 MB) sin instaladores ni dependencias externas. Guarda tus resoluciones favoritas y personalizadas en `%LOCALAPPDATA%\AspectShift\aspectshift_config.json` para mantener limpio el Escritorio.
 - **Soporte multipantalla y tasas de refresco (`Hz`)**: Detecta pantallas conectadas, resolución nativa y frecuencias registradas por el controlador gráfico.
+- **Creación directa de resoluciones personalizadas (NVIDIA) y acceso rápido a Panel GPU**: Si usas NVIDIA, permite registrar resoluciones directamente desde la app vía `nvapi64.dll`; en AMD o Intel muestra acceso directo al panel gráfico correspondiente cuando falta un modo.
 - **Confirmación de seguridad opcional y ventana siempre visible**: Desde **Opciones** puedes activar *Confirmar cambio* (revierte automáticamente tras 12 segundos si no confirmas) o mantener la ventana *Siempre visible* sobre otras aplicaciones.
 - **Aviso flotante en pantalla adaptado a DPI**: Muestra brevemente la resolución aplicada en la parte superior del monitor correspondiente sin robar foco ni bloquear clics.
 - **Ajuste opcional de ventana sin bordes**: Desde **Opciones** puedes elegir manualmente una ventana específica (o usar `Ctrl+Alt+B` sobre la ventana enfocada) para quitarle bordes y adaptarla a su propio monitor actual.
@@ -71,6 +72,7 @@ AspectShift/
 │   ├── main.rs              # Punto de entrada Win32, barra oscura DWM y ventana principal
 │   ├── app.rs               # Interfaz adaptable, tipografía, paleta y animaciones
 │   ├── display.rs           # Motor híbrido CCD (SetDisplayConfig) y respaldo Win32 GDI
+│   ├── custom_res.rs        # Creación directa en NVIDIA (nvapi64.dll) y acceso a Panel GPU
 │   ├── window_stretch.rs    # Utilidad opcional de ajuste sin bordes por ventana
 │   ├── toast.rs             # Notificación flotante minimalista en pantalla
 │   ├── updater.rs           # Comprobación y renovación automática vía WinHTTP

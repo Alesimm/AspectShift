@@ -83,6 +83,13 @@ pub struct DisplayChangeResult {
     pub message: String,
 }
 
+/// Error detallado al intentar aplicar una resolución en el controlador.
+#[derive(Debug, Clone)]
+pub struct DisplayError {
+    pub not_registered: bool,
+    pub message: String,
+}
+
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -387,7 +394,7 @@ pub fn apply_resolution(
     height: u32,
     target_hz: Option<u32>,
     force_stretch_scaling: bool,
-) -> Result<DisplayChangeResult, String> {
+) -> Result<DisplayChangeResult, DisplayError> {
     if let Some(res) =
         try_apply_resolution_ccd(device_name, width, height, target_hz, force_stretch_scaling)
     {
@@ -397,8 +404,11 @@ pub fn apply_resolution(
     let start = Instant::now();
     let dev_wide = to_wide_null(device_name);
 
-    let (_, mut base_dm) = query_mode_internal(device_name, ENUM_CURRENT_SETTINGS)
-        .ok_or_else(|| "No se pudo leer la configuración actual del monitor.".to_string())?;
+    let (_, mut base_dm) =
+        query_mode_internal(device_name, ENUM_CURRENT_SETTINGS).ok_or_else(|| DisplayError {
+            not_registered: false,
+            message: "No se pudo leer la configuración actual del monitor.".to_string(),
+        })?;
 
     base_dm.dmSize = size_of::<DEVMODEW>() as u16;
     base_dm.dmPelsWidth = width;
@@ -500,7 +510,7 @@ pub fn apply_resolution(
 pub fn restore_native(
     device_name: &str,
     native_fallback: Option<DisplayMode>,
-) -> Result<DisplayChangeResult, String> {
+) -> Result<DisplayChangeResult, DisplayError> {
     let start = Instant::now();
 
     if let Some(native) = native_fallback {
@@ -575,24 +585,38 @@ pub fn restore_native(
     }
 }
 
-fn explain_disp_change_error(code: i32, width: u32, height: u32) -> String {
+fn explain_disp_change_error(code: i32, width: u32, height: u32) -> DisplayError {
     match code {
-        DISP_CHANGE_BADMODE => format!(
-            "El driver GPU no tiene registrada {}×{} (código -2). Agrégala como resolución personalizada en el panel gráfico.",
-            width, height
-        ),
-        DISP_CHANGE_FAILED => format!(
-            "El driver rechazó {}×{} (código -1). Comprueba la frecuencia (Hz).",
-            width, height
-        ),
-        DISP_CHANGE_BADFLAGS => "Flags de visualización inválidos (código -4).".to_string(),
-        DISP_CHANGE_BADPARAM => "Parámetros de resolución fuera de rango (código -5).".to_string(),
-        DISP_CHANGE_NOTUPDATED => {
-            "No se pudo actualizar el perfil de pantalla (código -3).".to_string()
-        }
-        DISP_CHANGE_BADDUALVIEW => {
-            "Configuración incompatible con el modo multipantalla (código -6).".to_string()
-        }
-        other => format!("Error al aplicar {}×{} (código {}).", width, height, other),
+        DISP_CHANGE_BADMODE => DisplayError {
+            not_registered: true,
+            message: format!("{}×{} no está registrada en el controlador (código -2).", width, height),
+        },
+        DISP_CHANGE_FAILED => DisplayError {
+            not_registered: false,
+            message: format!(
+                "El driver rechazó {}×{} (código -1). Comprueba los Hz.",
+                width, height
+            ),
+        },
+        DISP_CHANGE_BADFLAGS => DisplayError {
+            not_registered: false,
+            message: "Flags de visualización inválidos (código -4).".to_string(),
+        },
+        DISP_CHANGE_BADPARAM => DisplayError {
+            not_registered: false,
+            message: "Parámetros de resolución fuera de rango (código -5).".to_string(),
+        },
+        DISP_CHANGE_NOTUPDATED => DisplayError {
+            not_registered: false,
+            message: "No se pudo actualizar el perfil de pantalla (código -3).".to_string(),
+        },
+        DISP_CHANGE_BADDUALVIEW => DisplayError {
+            not_registered: false,
+            message: "Configuración incompatible con modo multipantalla (código -6).".to_string(),
+        },
+        other => DisplayError {
+            not_registered: false,
+            message: format!("Error al aplicar {}×{} (código {}).", width, height, other),
+        },
     }
 }

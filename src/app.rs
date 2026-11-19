@@ -8,6 +8,9 @@ use egui::{
 };
 
 use crate::config::AppConfig;
+use crate::custom_res::{
+    create_nvidia_custom_resolution, detect_gpu_vendor, open_gpu_control_panel, GpuVendor,
+};
 use crate::display::{
     apply_resolution, enumerate_monitors, query_current_mode, restore_native, DisplayMode,
     MonitorInfo,
@@ -131,6 +134,8 @@ pub struct AspectShiftApp {
 
     status_text: String,
     status_kind: StatusKind,
+    gpu_vendor: GpuVendor,
+    missing_resolution: Option<(u32, u32)>,
     show_options_panel: bool,
     show_guide_modal: bool,
     show_updated_modal: bool,
@@ -161,6 +166,11 @@ impl AspectShiftApp {
 
         let config = AppConfig::load();
         let monitors = enumerate_monitors();
+        let adapter_hint = monitors
+            .first()
+            .map(|m| m.friendly_name.as_str())
+            .unwrap_or("");
+        let gpu_vendor = detect_gpu_vendor(adapter_hint);
         let candidate_windows = scan_candidate_windows();
 
         let logo_texture = if icon_rgba_64.len() == 64 * 64 * 4 {
@@ -213,6 +223,8 @@ impl AspectShiftApp {
             selected_window_idx: 0,
             status_text,
             status_kind,
+            gpu_vendor,
+            missing_resolution: None,
             show_options_panel: false,
             show_guide_modal: false,
             show_updated_modal: just_updated,
@@ -473,12 +485,68 @@ impl AspectShiftApp {
                     self.pending_confirm = None;
                 }
 
+                self.missing_resolution = None;
                 self.notify_resolution_changed(res.applied_mode, is_native_ratio);
                 self.status_text = res.message;
                 self.status_kind = StatusKind::Success;
             }
-            Err(err_msg) => {
-                self.status_text = err_msg;
+            Err(err) => {
+                if err.not_registered {
+                    self.missing_resolution = Some((width, height));
+                    self.status_text = if self.gpu_vendor == GpuVendor::Nvidia {
+                        format!(
+                            "{}×{} no está creada en el controlador NVIDIA.",
+                            width, height
+                        )
+                    } else {
+                        format!(
+                            "{}×{} no registrada (creación automática solo para NVIDIA).",
+                            width, height
+                        )
+                    };
+                } else {
+                    self.missing_resolution = None;
+                    self.status_text = err.message;
+                }
+                self.status_kind = StatusKind::Warning;
+            }
+        }
+    }
+
+    fn trigger_create_nvidia_resolution(&mut self, width: u32, height: u32) {
+        let Some(mon) = self.current_monitor().cloned() else {
+            return;
+        };
+        let hz = self.selected_hz.unwrap_or(mon.native_mode.hz).max(60);
+
+        match create_nvidia_custom_resolution(
+            &mon.device_name,
+            width,
+            height,
+            mon.native_mode.width,
+            mon.native_mode.height,
+            hz,
+        ) {
+            Ok(_) => {
+                self.full_refresh_devices_and_windows();
+                self.missing_resolution = None;
+                self.trigger_apply_resolution(width, height);
+            }
+            Err(err) => {
+                self.status_text = err;
+                self.status_kind = StatusKind::Warning;
+            }
+        }
+    }
+
+    fn trigger_open_gpu_panel(&mut self) {
+        match open_gpu_control_panel(self.gpu_vendor) {
+            Ok(msg) => {
+                self.status_text = msg;
+                self.status_kind = StatusKind::Ready;
+            }
+            Err(err) => {
+                self.status_text = err;
                 self.status_kind = StatusKind::Warning;
             }
         }
@@ -486,6 +554,7 @@ impl AspectShiftApp {
 
     fn trigger_restore_native(&mut self) {
         self.pending_confirm = None;
+        self.missing_resolution = None;
         let Some(mon) = self.current_monitor().cloned() else {
             return;
         };
@@ -499,8 +568,8 @@ impl AspectShiftApp {
                 self.status_text = res.message;
                 self.status_kind = StatusKind::Success;
             }
-            Err(err_msg) => {
-                self.status_text = err_msg;
+            Err(err) => {
+                self.status_text = err.message;
                 self.status_kind = StatusKind::Error;
             }
         }
@@ -526,6 +595,7 @@ impl AspectShiftApp {
                 {
                     m.current_mode = res.applied_mode;
                 }
+                self.missing_resolution = None;
                 self.notify_resolution_changed(res.applied_mode, false);
                 self.status_text = format!(
                     "Revertida automáticamente a {} × {} @ {} Hz",
@@ -534,7 +604,7 @@ impl AspectShiftApp {
                 self.status_kind = StatusKind::Warning;
             }
             Err(err) => {
-                self.status_text = err;
+                self.status_text = err.message;
                 self.status_kind = StatusKind::Error;
             }
         }
@@ -889,6 +959,46 @@ impl AspectShiftApp {
                                 self.config.add_custom_preset(w, h, tag);
                                 self.status_text = format!("Guardada {}×{}", w, h);
                                 self.status_kind = StatusKind::Success;
+                            }
+                        }
+
+                        if self.gpu_vendor == GpuVendor::Nvidia {
+                            if Self::animated_button(
+                                ui,
+                                "opt_create_nv_btn",
+                                "Crear en NVIDIA",
+                                11.0_f32,
+                                false,
+                                false,
+                                parsed_pair.is_some(),
+                            )
+                            .on_hover_text(
+                                "Registra esta resolución directamente en el driver NVIDIA y la aplica al instante",
+                            )
+                            .clicked()
+                            {
+                                if let Some((w, h)) = parsed_pair {
+                                    self.trigger_create_nvidia_resolution(w, h);
+                                }
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new("Crear en PC: solo NVIDIA")
+                                    .size(10.5_f32)
+                                    .color(TEXT_DIM),
+                            );
+                            if Self::animated_button(
+                                ui,
+                                "opt_open_gpu_panel",
+                                "Panel GPU",
+                                11.0_f32,
+                                false,
+                                false,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.trigger_open_gpu_panel();
                             }
                         }
                     });
@@ -1498,23 +1608,31 @@ impl AspectShiftApp {
         }
     }
 
-    fn render_footer(&self, ui: &mut Ui) {
+    fn render_footer(&mut self, ui: &mut Ui) {
         let dot_col = match self.status_kind {
             StatusKind::Ready => TEXT_DIM,
             StatusKind::Success => STATUS_OK,
             StatusKind::Warning => STATUS_WARN,
             StatusKind::Error => ACCENT_SOFT,
         };
-        let show_hotkeys = ui.available_width() > 440.0_f32;
+        let avail_w = ui.available_width();
+        let show_hotkeys = self.missing_resolution.is_none()
+            && avail_w > 460.0_f32
+            && self.status_text.chars().count() < 34;
+
+        let mut create_target: Option<(u32, u32)> = None;
+        let mut open_panel = false;
 
         Frame::none()
             .fill(BG_PANEL)
             .stroke(Stroke::new(1.0_f32, BORDER))
             .inner_margin(Margin::symmetric(12.0_f32, 6.0_f32))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 4.0_f32);
+
                     let (dot_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(8.0_f32, 8.0_f32), Sense::hover());
+                        ui.allocate_exact_size(Vec2::new(8.0_f32, 14.0_f32), Sense::hover());
                     ui.painter().circle_filled(dot_rect.center(), 3.2_f32, dot_col);
 
                     ui.add(
@@ -1523,10 +1641,39 @@ impl AspectShiftApp {
                                 .size(11.0_f32)
                                 .color(TEXT_MUTED),
                         )
-                        .truncate(),
+                        .wrap(),
                     );
 
-                    if show_hotkeys {
+                    if let Some((mw, mh)) = self.missing_resolution {
+                        if self.gpu_vendor == GpuVendor::Nvidia {
+                            if Self::animated_button(
+                                ui,
+                                "ftr_create_nv",
+                                &format!("Crear {}×{}", mw, mh),
+                                10.5_f32,
+                                true,
+                                false,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                create_target = Some((mw, mh));
+                            }
+                        }
+                        if Self::animated_button(
+                            ui,
+                            "ftr_open_panel",
+                            "Panel GPU",
+                            10.5_f32,
+                            self.gpu_vendor != GpuVendor::Nvidia,
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            open_panel = true;
+                        }
+                    } else if show_hotkeys {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
                                 RichText::new("Ctrl+Alt+S / N / B")
@@ -1537,6 +1684,12 @@ impl AspectShiftApp {
                     }
                 });
             });
+
+        if let Some((w, h)) = create_target {
+            self.trigger_create_nvidia_resolution(w, h);
+        } else if open_panel {
+            self.trigger_open_gpu_panel();
+        }
     }
 
     fn render_confirm_modal(&mut self, ctx: &egui::Context) {
