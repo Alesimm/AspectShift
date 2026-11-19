@@ -136,8 +136,7 @@ pub struct AspectShiftApp {
     status_kind: StatusKind,
     gpu_vendor: GpuVendor,
     missing_resolution: Option<(u32, u32)>,
-    show_options_panel: bool,
-    show_advanced_panel: bool,
+    show_settings_page: bool,
     show_guide_modal: bool,
     show_updated_modal: bool,
     last_mode_poll: Instant,
@@ -226,8 +225,7 @@ impl AspectShiftApp {
             status_kind,
             gpu_vendor,
             missing_resolution: None,
-            show_options_panel: false,
-            show_advanced_panel: false,
+            show_settings_page: false,
             show_guide_modal: false,
             show_updated_modal: just_updated,
             last_mode_poll: Instant::now(),
@@ -761,13 +759,13 @@ impl AspectShiftApp {
                             opts_label,
                             11.5_f32,
                             false,
-                            self.show_options_panel,
+                            self.show_settings_page,
                             true,
                         )
-                        .on_hover_text("Mostrar u ocultar opciones avanzadas")
+                        .on_hover_text("Abrir o cerrar la página de configuración")
                         .clicked()
                         {
-                            self.show_options_panel = !self.show_options_panel;
+                            self.show_settings_page = !self.show_settings_page;
                         }
 
                         if Self::animated_button(
@@ -814,63 +812,115 @@ impl AspectShiftApp {
         });
     }
 
-    fn render_options_drawer(&mut self, ui: &mut Ui) {
-        let open_t = ui.ctx().animate_bool_with_time(
-            Id::new("options_drawer_anim"),
-            self.show_options_panel,
-            0.24_f32,
-        );
-        if open_t <= 0.01_f32 {
-            return;
-        }
+    fn settings_section(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
+        Frame::none()
+            .fill(BG_PANEL)
+            .stroke(Stroke::new(1.0_f32, BORDER))
+            .rounding(Rounding::same(7.0_f32))
+            .inner_margin(Margin::symmetric(10.0_f32, 8.0_f32))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 6.0_f32);
+                ui.label(
+                    RichText::new(title)
+                        .size(11.5_f32)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                add_contents(ui);
+            });
+    }
 
-        let ease = 1.0_f32 - (1.0_f32 - open_t).powi(3);
-        let bg = lerp_color(BG_DARK, BG_PANEL, ease);
-        let stroke_col = lerp_color(BG_DARK, BORDER, ease);
+    fn render_settings_page(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Configuración")
+                    .size(14.0_f32)
+                    .strong()
+                    .color(TEXT_PRIMARY),
+            );
+            ui.label(
+                RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .size(10.5_f32)
+                    .color(TEXT_DIM),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if Self::animated_button(
+                    ui,
+                    "settings_back_btn",
+                    "← Volver",
+                    11.0_f32,
+                    false,
+                    false,
+                    true,
+                )
+                .on_hover_text("Volver a la vista de resoluciones (Esc)")
+                .clicked()
+                {
+                    self.show_settings_page = false;
+                }
+            });
+        });
 
-        ui.scope(|ui| {
-            ui.multiply_opacity(ease);
+        ui.add_space(6.0_f32);
 
-            Frame::none()
-                .fill(bg)
-                .stroke(Stroke::new(1.0_f32, stroke_col))
-                .rounding(Rounding::same(7.0_f32))
-                .inner_margin(Margin::symmetric(10.0_f32, 8.0_f32 * ease))
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 6.0_f32);
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0_f32;
 
-                    // Monitor y tasa de refresco
+                // 1. Pantalla y tasa de refresco
+                let monitor_count = self.monitors.len();
+                let current_monitor_idx = self.selected_monitor;
+                let monitor_labels: Vec<String> = self
+                    .monitors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| m.display_label(i))
+                    .collect();
+                let hz_list = self
+                    .current_monitor()
+                    .map(|m| m.all_supported_hz.clone())
+                    .unwrap_or_else(|| vec![60]);
+
+                let mut new_monitor_idx = current_monitor_idx;
+                let mut refresh_clicked = false;
+
+                Self::settings_section(ui, "Pantalla y frecuencia", |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Pantalla:").size(11.0_f32).color(TEXT_MUTED));
-
-                        if self.monitors.len() > 1 {
-                            let current_label = format!("Pantalla {}", self.selected_monitor + 1);
+                        if monitor_count > 1 {
+                            ui.label(
+                                RichText::new("Pantalla:")
+                                    .size(11.0_f32)
+                                    .color(TEXT_MUTED),
+                            );
+                            let current_label = format!("Pantalla {}", new_monitor_idx + 1);
                             egui::ComboBox::from_id_salt("monitor_selector")
-                                .width(105.0_f32)
+                                .width(110.0_f32)
                                 .selected_text(RichText::new(current_label).size(11.0_f32))
                                 .show_ui(ui, |ui| {
-                                    for idx in 0..self.monitors.len() {
-                                        let label = self.monitors[idx].display_label(idx);
+                                    for (idx, label) in monitor_labels.iter().enumerate() {
                                         if ui
-                                            .selectable_label(self.selected_monitor == idx, label)
+                                            .selectable_label(new_monitor_idx == idx, label)
                                             .clicked()
                                         {
-                                            self.selected_monitor = idx;
+                                            new_monitor_idx = idx;
                                         }
                                     }
                                 });
                         }
 
-                        let hz_list = self
-                            .current_monitor()
-                            .map(|m| m.all_supported_hz.clone())
-                            .unwrap_or_else(|| vec![60]);
+                        ui.label(
+                            RichText::new("Frecuencia:")
+                                .size(11.0_f32)
+                                .color(TEXT_MUTED),
+                        );
                         let selected_hz_text = match self.selected_hz {
-                            None => "Hz: Auto".to_string(),
+                            None => "Auto".to_string(),
                             Some(hz) => format!("{} Hz", hz),
                         };
                         egui::ComboBox::from_id_salt("hz_selector")
-                            .width(78.0_f32)
+                            .width(82.0_f32)
                             .selected_text(RichText::new(selected_hz_text).size(11.0_f32))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut self.selected_hz, None, "Auto");
@@ -895,26 +945,34 @@ impl AspectShiftApp {
                         .on_hover_text("Recargar monitores y ventanas")
                         .clicked()
                         {
-                            self.full_refresh_devices_and_windows();
+                            refresh_clicked = true;
                         }
                     });
+                });
 
-                    // Resolución personalizada (soporta Enter para aplicar rápido)
+                self.selected_monitor = new_monitor_idx;
+                if refresh_clicked {
+                    self.full_refresh_devices_and_windows();
+                }
+
+                // 2. Resolución personalizada
+                let mut custom_apply: Option<(u32, u32)> = None;
+                let mut custom_save: Option<(u32, u32)> = None;
+                let mut custom_create_nv: Option<(u32, u32)> = None;
+                let mut custom_open_panel = false;
+                let gpu_vendor = self.gpu_vendor;
+
+                Self::settings_section(ui, "Resolución personalizada", |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new("Personalizada:")
-                                .size(11.0_f32)
-                                .color(TEXT_MUTED),
-                        );
                         let w_resp = ui.add(
                             egui::TextEdit::singleline(&mut self.custom_w_input)
-                                .desired_width(48.0_f32)
+                                .desired_width(52.0_f32)
                                 .hint_text("1440"),
                         );
                         ui.label(RichText::new("×").size(11.5_f32).color(TEXT_DIM));
                         let h_resp = ui.add(
                             egui::TextEdit::singleline(&mut self.custom_h_input)
-                                .desired_width(48.0_f32)
+                                .desired_width(52.0_f32)
                                 .hint_text("1080"),
                         );
 
@@ -940,14 +998,12 @@ impl AspectShiftApp {
                                 "Aplicar",
                                 11.0_f32,
                                 true,
-                               false,
+                                false,
                                 parsed_pair.is_some(),
                             )
                             .clicked()
                         {
-                            if let Some((w, h)) = parsed_pair {
-                                self.trigger_apply_resolution(w, h);
-                            }
+                            custom_apply = parsed_pair;
                         }
 
                         if Self::animated_button(
@@ -961,16 +1017,10 @@ impl AspectShiftApp {
                         )
                         .clicked()
                         {
-                            if let Some((w, h)) = parsed_pair {
-                                let tag =
-                                    Some(format!("{} Personalizada", format_aspect_ratio(w, h)));
-                                self.config.add_custom_preset(w, h, tag);
-                                self.status_text = format!("Guardada {}×{}", w, h);
-                                self.status_kind = StatusKind::Success;
-                            }
+                            custom_save = parsed_pair;
                         }
 
-                        if self.gpu_vendor == GpuVendor::Nvidia {
+                        if gpu_vendor == GpuVendor::Nvidia {
                             if Self::animated_button(
                                 ui,
                                 "opt_create_nv_btn",
@@ -985,9 +1035,7 @@ impl AspectShiftApp {
                             )
                             .clicked()
                             {
-                                if let Some((w, h)) = parsed_pair {
-                                    self.trigger_create_nvidia_resolution(w, h);
-                                }
+                                custom_create_nv = parsed_pair;
                             }
                         } else {
                             ui.label(
@@ -1006,48 +1054,173 @@ impl AspectShiftApp {
                             )
                             .clicked()
                             {
-                                self.trigger_open_gpu_panel();
+                                custom_open_panel = true;
                             }
                         }
                     });
+                });
 
-                    // Ajuste manual de ventana sin bordes
+                if let Some((w, h)) = custom_apply {
+                    self.trigger_apply_resolution(w, h);
+                } else if let Some((w, h)) = custom_save {
+                    let tag = Some(format!("{} Personalizada", format_aspect_ratio(w, h)));
+                    self.config.add_custom_preset(w, h, tag);
+                    self.status_text = format!("Guardada {}×{}", w, h);
+                    self.status_kind = StatusKind::Success;
+                } else if let Some((w, h)) = custom_create_nv {
+                    self.trigger_create_nvidia_resolution(w, h);
+                } else if custom_open_panel {
+                    self.trigger_open_gpu_panel();
+                }
+
+                // 3. Motor de cambio y seguridad
+                let mut mode_changed: Option<DisplayApplyMode> = None;
+                let current_mode = self.config.display_apply_mode;
+                let mut force_stretch = self.config.force_gpu_stretch_flag;
+                let mut confirm_safe = self.config.confirm_resolution_change;
+
+                Self::settings_section(ui, "Motor de cambio y seguridad", |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            RichText::new("Ventana:")
+                            RichText::new("Motor:")
                                 .size(11.0_f32)
                                 .color(TEXT_MUTED),
                         );
 
-                        let selected_win_label = if self.selected_window_idx == 0 {
-                            "Seleccionar ventana...".to_string()
-                        } else if let Some(w) =
-                            self.candidate_windows.get(self.selected_window_idx - 1)
+                        if Self::animated_button(
+                            ui,
+                            "adv_mode_fast_btn",
+                            "Rápido (Sin parpadeo)",
+                            11.0_f32,
+                            false,
+                            current_mode == DisplayApplyMode::FastVirtual,
+                            true,
+                        )
+                        .on_hover_text(
+                            "Usa escalado virtual CCD manteniendo la señal física sin pantalla negra; ideal para escritorio y ventanas sin bordes",
+                        )
+                        .clicked()
+                            && current_mode != DisplayApplyMode::FastVirtual
                         {
-                            let mut s: String = w.title.chars().take(20).collect();
-                            if w.title.chars().count() > 20 {
-                                s.push('…');
-                            }
-                            s
-                        } else {
-                            "Seleccionar ventana...".to_string()
-                        };
+                            mode_changed = Some(DisplayApplyMode::FastVirtual);
+                        }
 
+                        if Self::animated_button(
+                            ui,
+                            "adv_mode_driver_btn",
+                            "Compatible (Driver)",
+                            11.0_f32,
+                            false,
+                            current_mode == DisplayApplyMode::CompatibleDriver,
+                            true,
+                        )
+                        .on_hover_text(
+                            "Usa únicamente modos registrados en el controlador gráfico; recomendado para pantalla completa exclusiva",
+                        )
+                        .clicked()
+                            && current_mode != DisplayApplyMode::CompatibleDriver
+                        {
+                            mode_changed = Some(DisplayApplyMode::CompatibleDriver);
+                        }
+                    });
+
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .checkbox(
+                                &mut force_stretch,
+                                RichText::new("Escalado GPU")
+                                    .size(11.0_f32)
+                                    .color(TEXT_MUTED),
+                            )
+                            .on_hover_text(
+                                "Estira la imagen a pantalla completa en lugar de mantener franjas negras",
+                            )
+                            .changed()
+                        {
+                            self.config.force_gpu_stretch_flag = force_stretch;
+                            self.config.save();
+                        }
+
+                        if ui
+                            .checkbox(
+                                &mut confirm_safe,
+                                RichText::new("Confirmar cambio")
+                                    .size(11.0_f32)
+                                    .color(TEXT_MUTED),
+                            )
+                            .on_hover_text(
+                                "Si la pantalla no se ve bien tras cambiar, revierte automáticamente en 12 segundos",
+                            )
+                            .changed()
+                        {
+                            self.config.confirm_resolution_change = confirm_safe;
+                            self.config.save();
+                        }
+                    });
+
+                    let hint_text = match current_mode {
+                        DisplayApplyMode::FastVirtual => {
+                            "Modo rápido activo: aplica resoluciones mediante escalado virtual CCD sin reiniciar el monitor."
+                        }
+                        DisplayApplyMode::CompatibleDriver => {
+                            "Modo compatible activo: aplica modos nativos del driver gráfico (permite registrar resoluciones)."
+                        }
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(hint_text)
+                                .size(10.5_f32)
+                                .color(TEXT_DIM),
+                        )
+                        .wrap(),
+                    );
+                });
+
+                if let Some(new_mode) = mode_changed {
+                    self.config.display_apply_mode = new_mode;
+                    self.config.save();
+                    self.missing_resolution = None;
+                    self.status_text = match new_mode {
+                        DisplayApplyMode::FastVirtual => {
+                            "Motor configurado: Rápido (Sin parpadeo)".to_string()
+                        }
+                        DisplayApplyMode::CompatibleDriver => {
+                            "Motor configurado: Compatible (Driver)".to_string()
+                        }
+                    };
+                    self.status_kind = StatusKind::Ready;
+                }
+
+                // 4. Ajuste de ventana sin bordes
+                let mut adjust_window_clicked = false;
+                let selected_win_label = if self.selected_window_idx == 0 {
+                    "Seleccionar ventana...".to_string()
+                } else if let Some(w) = self.candidate_windows.get(self.selected_window_idx - 1) {
+                    let mut s: String = w.title.chars().take(24).collect();
+                    if w.title.chars().count() > 24 {
+                        s.push('…');
+                    }
+                    s
+                } else {
+                    "Seleccionar ventana...".to_string()
+                };
+                let windows_snapshot: Vec<String> =
+                    self.candidate_windows.iter().map(|w| w.title.clone()).collect();
+                let mut new_win_idx = self.selected_window_idx;
+
+                Self::settings_section(ui, "Ventana sin bordes", |ui| {
+                    ui.horizontal_wrapped(|ui| {
                         egui::ComboBox::from_id_salt("window_selector")
-                            .width(148.0_f32)
+                            .width(175.0_f32)
                             .selected_text(RichText::new(selected_win_label).size(11.0_f32))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
-                                    &mut self.selected_window_idx,
+                                    &mut new_win_idx,
                                     0,
                                     "Ninguna (no modificar ventanas)",
                                 );
-                                for (i, w) in self.candidate_windows.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut self.selected_window_idx,
-                                        i + 1,
-                                        &w.title,
-                                    );
+                                for (i, title) in windows_snapshot.iter().enumerate() {
+                                    ui.selectable_value(&mut new_win_idx, i + 1, title);
                                 }
                             });
 
@@ -1058,20 +1231,36 @@ impl AspectShiftApp {
                             11.0_f32,
                             false,
                             false,
-                            self.selected_window_idx > 0,
+                            new_win_idx > 0,
                         )
                         .on_hover_text(
                             "Adapta únicamente la ventana seleccionada a su monitor actual",
                         )
                         .clicked()
                         {
-                            self.trigger_adjust_window(false);
+                            adjust_window_clicked = true;
                         }
                     });
+                });
 
-                    // Preferencias y guía
+                self.selected_window_idx = new_win_idx;
+                if adjust_window_clicked {
+                    self.trigger_adjust_window(false);
+                }
+
+                // 5. Preferencias y aplicación
+                let mut restore_exit = self.config.restore_native_on_exit;
+                let mut always_top = self.config.always_on_top;
+                let mut toggle_guide = false;
+                let mut check_updates = false;
+                let mut toggle_start_menu = false;
+                let update_checking = self.update_checking;
+                let update_downloading = self.update_downloading;
+                let show_guide = self.show_guide_modal;
+                let in_start_menu = self.in_start_menu;
+
+                Self::settings_section(ui, "Aplicación", |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        let mut restore_exit = self.config.restore_native_on_exit;
                         if ui
                             .checkbox(
                                 &mut restore_exit,
@@ -1085,7 +1274,6 @@ impl AspectShiftApp {
                             self.config.save();
                         }
 
-                        let mut always_top = self.config.always_on_top;
                         if ui
                             .checkbox(
                                 &mut always_top,
@@ -1104,22 +1292,24 @@ impl AspectShiftApp {
                             };
                             ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(level));
                         }
+                    });
 
+                    ui.horizontal_wrapped(|ui| {
                         if Self::animated_button(
                             ui,
                             "opt_guide_btn",
                             "Guía",
                             11.0_f32,
                             false,
-                            self.show_guide_modal,
+                            show_guide,
                             true,
                         )
                         .clicked()
                         {
-                            self.show_guide_modal = !self.show_guide_modal;
+                            toggle_guide = true;
                         }
 
-                        let check_label = if self.update_checking {
+                        let check_label = if update_checking {
                             "Buscando..."
                         } else {
                             "Buscar actualización"
@@ -1131,16 +1321,14 @@ impl AspectShiftApp {
                             11.0_f32,
                             false,
                             false,
-                            !self.update_checking && !self.update_downloading,
+                            !update_checking && !update_downloading,
                         )
                         .clicked()
                         {
-                            self.update_checking = true;
-                            self.update_manager
-                                .check_for_updates(ui.ctx().clone(), true);
+                            check_updates = true;
                         }
 
-                        let start_menu_label = if self.in_start_menu {
+                        let start_menu_label = if in_start_menu {
                             "Quitar de Inicio"
                         } else {
                             "Añadir a Inicio"
@@ -1151,7 +1339,7 @@ impl AspectShiftApp {
                             start_menu_label,
                             11.0_f32,
                             false,
-                            self.in_start_menu,
+                            in_start_menu,
                             true,
                         )
                         .on_hover_text(
@@ -1159,186 +1347,38 @@ impl AspectShiftApp {
                         )
                         .clicked()
                         {
-                            let res = if self.in_start_menu {
-                                remove_from_start_menu()
-                            } else {
-                                register_in_start_menu()
-                            };
-                            match res {
-                                Ok(msg) => {
-                                    self.in_start_menu = is_in_start_menu();
-                                    self.status_text = msg;
-                                    self.status_kind = StatusKind::Success;
-                                }
-                                Err(err) => {
-                                    self.status_text = err;
-                                    self.status_kind = StatusKind::Warning;
-                                }
-                            }
+                            toggle_start_menu = true;
                         }
-
-                        if Self::animated_button(
-                            ui,
-                            "opt_advanced_btn",
-                            "Avanzado",
-                            11.0_f32,
-                            false,
-                            self.show_advanced_panel,
-                            true,
-                        )
-                        .on_hover_text("Configuración de motor de cambio, escalado GPU y confirmación")
-                        .clicked()
-                        {
-                            self.show_advanced_panel = !self.show_advanced_panel;
-                        }
-
-                        ui.label(
-                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                .size(10.5_f32)
-                                .color(TEXT_DIM),
-                        );
                     });
-
-                    // Sub-panel colapsable de configuración avanzada
-                    let adv_t = ui.ctx().animate_bool_with_time(
-                        Id::new("advanced_drawer_anim"),
-                        self.show_advanced_panel,
-                        0.20_f32,
-                    );
-                    if adv_t > 0.01_f32 {
-                        let adv_ease = 1.0_f32 - (1.0_f32 - adv_t).powi(3);
-                        ui.scope(|ui| {
-                            ui.multiply_opacity(adv_ease);
-                            Frame::none()
-                                .fill(BG_DARK)
-                                .stroke(Stroke::new(1.0_f32, BORDER))
-                                .rounding(Rounding::same(6.0_f32))
-                                .inner_margin(Margin::symmetric(9.0_f32, 7.0_f32 * adv_ease))
-                                .show(ui, |ui| {
-                                    ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 5.0_f32);
-
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(
-                                            RichText::new("Motor:")
-                                                .size(11.0_f32)
-                                                .color(TEXT_MUTED),
-                                        );
-
-                                        if Self::animated_button(
-                                            ui,
-                                            "adv_mode_fast_btn",
-                                            "Rápido (Sin parpadeo)",
-                                            11.0_f32,
-                                            false,
-                                            self.config.display_apply_mode
-                                                == DisplayApplyMode::FastVirtual,
-                                            true,
-                                        )
-                                        .on_hover_text(
-                                            "Usa escalado virtual CCD manteniendo la señal física sin pantalla negra; ideal para escritorio y ventanas sin bordes",
-                                        )
-                                        .clicked()
-                                            && self.config.display_apply_mode
-                                                != DisplayApplyMode::FastVirtual
-                                        {
-                                            self.config.display_apply_mode =
-                                                DisplayApplyMode::FastVirtual;
-                                            self.config.save();
-                                            self.missing_resolution = None;
-                                            self.status_text =
-                                                "Motor configurado: Rápido (Sin parpadeo)"
-                                                    .to_string();
-                                            self.status_kind = StatusKind::Ready;
-                                        }
-
-                                        if Self::animated_button(
-                                            ui,
-                                            "adv_mode_driver_btn",
-                                            "Compatible (Driver)",
-                                            11.0_f32,
-                                            false,
-                                            self.config.display_apply_mode
-                                                == DisplayApplyMode::CompatibleDriver,
-                                            true,
-                                        )
-                                        .on_hover_text(
-                                            "Usa únicamente modos registrados en el controlador gráfico; recomendado para pantalla completa exclusiva",
-                                        )
-                                        .clicked()
-                                            && self.config.display_apply_mode
-                                                != DisplayApplyMode::CompatibleDriver
-                                        {
-                                            self.config.display_apply_mode =
-                                                DisplayApplyMode::CompatibleDriver;
-                                            self.config.save();
-                                            self.missing_resolution = None;
-                                            self.status_text =
-                                                "Motor configurado: Compatible (Driver)"
-                                                    .to_string();
-                                            self.status_kind = StatusKind::Ready;
-                                        }
-                                    });
-
-                                    ui.horizontal_wrapped(|ui| {
-                                        let mut force_stretch = self.config.force_gpu_stretch_flag;
-                                        if ui
-                                            .checkbox(
-                                                &mut force_stretch,
-                                                RichText::new("Escalado GPU")
-                                                    .size(11.0_f32)
-                                                    .color(TEXT_MUTED),
-                                            )
-                                            .on_hover_text(
-                                                "Estira la imagen a pantalla completa en lugar de mantener franjas negras",
-                                            )
-                                            .changed()
-                                        {
-                                            self.config.force_gpu_stretch_flag = force_stretch;
-                                            self.config.save();
-                                        }
-
-                                        let mut confirm_safe =
-                                            self.config.confirm_resolution_change;
-                                        if ui
-                                            .checkbox(
-                                                &mut confirm_safe,
-                                                RichText::new("Confirmar cambio")
-                                                    .size(11.0_f32)
-                                                    .color(TEXT_MUTED),
-                                            )
-                                            .on_hover_text(
-                                                "Si la pantalla no se ve bien tras cambiar, revierte automáticamente en 12 segundos",
-                                            )
-                                            .changed()
-                                        {
-                                            self.config.confirm_resolution_change = confirm_safe;
-                                            self.config.save();
-                                        }
-                                    });
-
-                                    let hint_text = match self.config.display_apply_mode {
-                                        DisplayApplyMode::FastVirtual => {
-                                            "Modo rápido activo: aplica resoluciones mediante escalado virtual CCD sin reiniciar el monitor."
-                                        }
-                                        DisplayApplyMode::CompatibleDriver => {
-                                            "Modo compatible activo: aplica modos nativos del driver gráfico (permite registrar resoluciones)."
-                                        }
-                                    };
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(hint_text)
-                                                .size(10.5_f32)
-                                                .color(TEXT_DIM),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
-                        });
-                    }
                 });
-        });
 
-        ui.add_space(6.0_f32 * ease);
+                if toggle_guide {
+                    self.show_guide_modal = !self.show_guide_modal;
+                }
+                if check_updates {
+                    self.update_checking = true;
+                    self.update_manager
+                        .check_for_updates(ui.ctx().clone(), true);
+                }
+                if toggle_start_menu {
+                    let res = if self.in_start_menu {
+                        remove_from_start_menu()
+                    } else {
+                        register_in_start_menu()
+                    };
+                    match res {
+                        Ok(msg) => {
+                            self.in_start_menu = is_in_start_menu();
+                            self.status_text = msg;
+                            self.status_kind = StatusKind::Success;
+                        }
+                        Err(err) => {
+                            self.status_text = err;
+                            self.status_kind = StatusKind::Warning;
+                        }
+                    }
+                }
+            });
     }
 
     fn render_update_banner(&mut self, ui: &mut Ui) {
@@ -1754,67 +1794,61 @@ impl AspectShiftApp {
         let mut create_target: Option<(u32, u32)> = None;
         let mut open_panel = false;
 
-        Frame::none()
-            .fill(BG_PANEL)
-            .stroke(Stroke::new(1.0_f32, BORDER))
-            .inner_margin(Margin::symmetric(12.0_f32, 6.0_f32))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 4.0_f32);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 4.0_f32);
 
-                    let (dot_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(8.0_f32, 14.0_f32), Sense::hover());
-                    ui.painter().circle_filled(dot_rect.center(), 3.2_f32, dot_col);
+            let (dot_rect, _) =
+                ui.allocate_exact_size(Vec2::new(8.0_f32, 14.0_f32), Sense::hover());
+            ui.painter().circle_filled(dot_rect.center(), 3.2_f32, dot_col);
 
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&self.status_text)
-                                .size(11.0_f32)
-                                .color(TEXT_MUTED),
-                        )
-                        .wrap(),
-                    );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&self.status_text)
+                        .size(11.0_f32)
+                        .color(TEXT_MUTED),
+                )
+                .wrap(),
+            );
 
-                    if let Some((mw, mh)) = self.missing_resolution {
-                        if self.gpu_vendor == GpuVendor::Nvidia {
-                            if Self::animated_button(
-                                ui,
-                                "ftr_create_nv",
-                                &format!("Crear {}×{}", mw, mh),
-                                10.5_f32,
-                                true,
-                                false,
-                                true,
-                            )
-                            .clicked()
-                            {
-                                create_target = Some((mw, mh));
-                            }
-                        }
-                        if Self::animated_button(
-                            ui,
-                            "ftr_open_panel",
-                            "Panel GPU",
-                            10.5_f32,
-                            self.gpu_vendor != GpuVendor::Nvidia,
-                            false,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            open_panel = true;
-                        }
-                    } else if show_hotkeys {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(
-                                RichText::new("Ctrl+Alt+S / N / B")
-                                    .size(10.5_f32)
-                                    .color(TEXT_DIM),
-                            );
-                        });
+            if let Some((mw, mh)) = self.missing_resolution {
+                if self.gpu_vendor == GpuVendor::Nvidia {
+                    if Self::animated_button(
+                        ui,
+                        "ftr_create_nv",
+                        &format!("Crear {}×{}", mw, mh),
+                        10.5_f32,
+                        true,
+                        false,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        create_target = Some((mw, mh));
                     }
+                }
+                if Self::animated_button(
+                    ui,
+                    "ftr_open_panel",
+                    "Panel GPU",
+                    10.5_f32,
+                    self.gpu_vendor != GpuVendor::Nvidia,
+                    false,
+                    true,
+                )
+                .clicked()
+                {
+                    open_panel = true;
+                }
+            } else if show_hotkeys {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new("Ctrl+Alt+S / N / B")
+                            .size(10.5_f32)
+                            .color(TEXT_DIM),
+                    );
                 });
-            });
+            }
+        });
 
         if let Some((w, h)) = create_target {
             self.trigger_create_nvidia_resolution(w, h);
@@ -1970,7 +2004,7 @@ impl AspectShiftApp {
                     );
                     ui.label(
                         RichText::new(
-                            "En Opciones → Avanzado puedes alternar entre Rápido (Sin parpadeo, escalado virtual CCD ideal para escritorio y ventanas sin bordes) y Compatible (Driver). Si un programa en pantalla completa exclusiva requiere un modo nativo del controlador, créalo desde NVIDIA o el panel de tu GPU.",
+                            "En Opciones → Motor de cambio y seguridad puedes alternar entre Rápido (Sin parpadeo, escalado virtual CCD ideal para escritorio y ventanas sin bordes) y Compatible (Driver). Si un programa en pantalla completa exclusiva requiere un modo nativo del controlador, créalo desde NVIDIA o el panel de tu GPU.",
                         )
                         .size(11.5_f32)
                         .color(TEXT_MUTED),
@@ -2087,10 +2121,12 @@ impl eframe::App for AspectShiftApp {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if self.pending_confirm.is_some() {
                 self.revert_pending_confirmation();
-            } else if self.show_updated_modal {
-                self.show_updated_modal = false;
             } else if self.show_guide_modal {
                 self.show_guide_modal = false;
+            } else if self.show_updated_modal {
+                self.show_updated_modal = false;
+            } else if self.show_settings_page {
+                self.show_settings_page = false;
             }
         }
 
@@ -2101,7 +2137,12 @@ impl eframe::App for AspectShiftApp {
             });
 
         egui::TopBottomPanel::bottom("footer_panel")
-            .frame(Frame::none())
+            .frame(
+                Frame::none()
+                    .fill(BG_PANEL)
+                    .stroke(Stroke::new(1.0_f32, BORDER))
+                    .inner_margin(Margin::symmetric(12.0_f32, 6.0_f32)),
+            )
             .show(ctx, |ui| {
                 self.render_footer(ui);
             });
@@ -2114,16 +2155,19 @@ impl eframe::App for AspectShiftApp {
             )
             .show(ctx, |ui| {
                 self.render_update_banner(ui);
-                self.render_category_bar(ui);
-                ui.add_space(6.0_f32);
 
-                self.render_options_drawer(ui);
+                if self.show_settings_page {
+                    self.render_settings_page(ui);
+                } else {
+                    self.render_category_bar(ui);
+                    ui.add_space(6.0_f32);
 
-                ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        self.render_resolution_grid(ui);
-                    });
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.render_resolution_grid(ui);
+                        });
+                }
             });
 
         self.render_confirm_modal(ctx);
