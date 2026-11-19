@@ -5,6 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::presets::{PresetCategory, ResolutionPreset};
 
+/// Estrategia de aplicación de resolución en Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplayApplyMode {
+    FastVirtual,
+    CompatibleDriver,
+}
+
+impl Default for DisplayApplyMode {
+    fn default() -> Self {
+        Self::FastVirtual
+    }
+}
+
 /// Entrada de resolución personalizada guardada por el usuario.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomPresetEntry {
@@ -20,6 +33,7 @@ pub struct AppConfig {
     pub favorites: Vec<(u32, u32)>,
     pub custom_presets: Vec<CustomPresetEntry>,
     pub last_stretch_res: (u32, u32),
+    pub display_apply_mode: DisplayApplyMode,
     pub force_gpu_stretch_flag: bool,
     pub restore_native_on_exit: bool,
     pub always_on_top: bool,
@@ -42,6 +56,7 @@ impl Default for AppConfig {
             ],
             custom_presets: Vec::new(),
             last_stretch_res: (1440, 1080),
+            display_apply_mode: DisplayApplyMode::FastVirtual,
             force_gpu_stretch_flag: true,
             restore_native_on_exit: false,
             always_on_top: false,
@@ -146,5 +161,20 @@ impl AppConfig {
                 is_custom: true,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_deserializes_legacy_json_with_default_apply_mode() {
+        let legacy = r#"{"last_stretch_res":[1440,1080],"force_gpu_stretch_flag":true}"#;
+        let cfg: AppConfig =
+            serde_json::from_str(legacy).expect("Un JSON previo debe cargarse sin fallos");
+        assert_eq!(cfg.display_apply_mode, DisplayApplyMode::FastVirtual);
+        assert_eq!(cfg.last_stretch_res, (1440, 1080));
+        assert!(cfg.force_gpu_stretch_flag);
     }
 }

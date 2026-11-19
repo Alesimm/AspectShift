@@ -7,7 +7,7 @@ use egui::{
     TextureHandle, TextureOptions, Ui, Vec2, ViewportCommand, WindowLevel,
 };
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, DisplayApplyMode};
 use crate::custom_res::{
     create_nvidia_custom_resolution, detect_gpu_vendor, open_gpu_control_panel, GpuVendor,
 };
@@ -137,6 +137,7 @@ pub struct AspectShiftApp {
     gpu_vendor: GpuVendor,
     missing_resolution: Option<(u32, u32)>,
     show_options_panel: bool,
+    show_advanced_panel: bool,
     show_guide_modal: bool,
     show_updated_modal: bool,
     last_mode_poll: Instant,
@@ -226,6 +227,7 @@ impl AspectShiftApp {
             gpu_vendor,
             missing_resolution: None,
             show_options_panel: false,
+            show_advanced_panel: false,
             show_guide_modal: false,
             show_updated_modal: just_updated,
             last_mode_poll: Instant::now(),
@@ -460,6 +462,7 @@ impl AspectShiftApp {
             height,
             target_hz,
             self.config.force_gpu_stretch_flag,
+            self.config.display_apply_mode,
         ) {
             Ok(res) => {
                 if let Some(m) = self.monitors.get_mut(self.selected_monitor) {
@@ -559,7 +562,11 @@ impl AspectShiftApp {
             return;
         };
 
-        match restore_native(&mon.device_name, Some(mon.native_mode)) {
+        match restore_native(
+            &mon.device_name,
+            Some(mon.native_mode),
+            self.config.display_apply_mode,
+        ) {
             Ok(res) => {
                 if let Some(m) = self.monitors.get_mut(self.selected_monitor) {
                     m.current_mode = res.applied_mode;
@@ -586,6 +593,7 @@ impl AspectShiftApp {
             prev.height,
             Some(prev.hz),
             false,
+            self.config.display_apply_mode,
         ) {
             Ok(res) => {
                 if let Some(m) = self
@@ -1063,20 +1071,6 @@ impl AspectShiftApp {
 
                     // Preferencias y guía
                     ui.horizontal_wrapped(|ui| {
-                        let mut force_stretch = self.config.force_gpu_stretch_flag;
-                        if ui
-                            .checkbox(
-                                &mut force_stretch,
-                                RichText::new("Escalado GPU")
-                                    .size(11.0_f32)
-                                    .color(TEXT_MUTED),
-                            )
-                            .changed()
-                        {
-                            self.config.force_gpu_stretch_flag = force_stretch;
-                            self.config.save();
-                        }
-
                         let mut restore_exit = self.config.restore_native_on_exit;
                         if ui
                             .checkbox(
@@ -1109,23 +1103,6 @@ impl AspectShiftApp {
                                 WindowLevel::Normal
                             };
                             ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(level));
-                        }
-
-                        let mut confirm_safe = self.config.confirm_resolution_change;
-                        if ui
-                            .checkbox(
-                                &mut confirm_safe,
-                                RichText::new("Confirmar cambio")
-                                    .size(11.0_f32)
-                                    .color(TEXT_MUTED),
-                            )
-                            .on_hover_text(
-                                "Si la pantalla no se ve bien tras cambiar, revierte automáticamente en 12 segundos",
-                            )
-                            .changed()
-                        {
-                            self.config.confirm_resolution_change = confirm_safe;
-                            self.config.save();
                         }
 
                         if Self::animated_button(
@@ -1200,12 +1177,164 @@ impl AspectShiftApp {
                             }
                         }
 
+                        if Self::animated_button(
+                            ui,
+                            "opt_advanced_btn",
+                            "Avanzado",
+                            11.0_f32,
+                            false,
+                            self.show_advanced_panel,
+                            true,
+                        )
+                        .on_hover_text("Configuración de motor de cambio, escalado GPU y confirmación")
+                        .clicked()
+                        {
+                            self.show_advanced_panel = !self.show_advanced_panel;
+                        }
+
                         ui.label(
                             RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                 .size(10.5_f32)
                                 .color(TEXT_DIM),
                         );
                     });
+
+                    // Sub-panel colapsable de configuración avanzada
+                    let adv_t = ui.ctx().animate_bool_with_time(
+                        Id::new("advanced_drawer_anim"),
+                        self.show_advanced_panel,
+                        0.20_f32,
+                    );
+                    if adv_t > 0.01_f32 {
+                        let adv_ease = 1.0_f32 - (1.0_f32 - adv_t).powi(3);
+                        ui.scope(|ui| {
+                            ui.multiply_opacity(adv_ease);
+                            Frame::none()
+                                .fill(BG_DARK)
+                                .stroke(Stroke::new(1.0_f32, BORDER))
+                                .rounding(Rounding::same(6.0_f32))
+                                .inner_margin(Margin::symmetric(9.0_f32, 7.0_f32 * adv_ease))
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(6.0_f32, 5.0_f32);
+
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(
+                                            RichText::new("Motor:")
+                                                .size(11.0_f32)
+                                                .color(TEXT_MUTED),
+                                        );
+
+                                        if Self::animated_button(
+                                            ui,
+                                            "adv_mode_fast_btn",
+                                            "Rápido (Sin parpadeo)",
+                                            11.0_f32,
+                                            false,
+                                            self.config.display_apply_mode
+                                                == DisplayApplyMode::FastVirtual,
+                                            true,
+                                        )
+                                        .on_hover_text(
+                                            "Usa escalado virtual CCD manteniendo la señal física sin pantalla negra; ideal para escritorio y ventanas sin bordes",
+                                        )
+                                        .clicked()
+                                            && self.config.display_apply_mode
+                                                != DisplayApplyMode::FastVirtual
+                                        {
+                                            self.config.display_apply_mode =
+                                                DisplayApplyMode::FastVirtual;
+                                            self.config.save();
+                                            self.missing_resolution = None;
+                                            self.status_text =
+                                                "Motor configurado: Rápido (Sin parpadeo)"
+                                                    .to_string();
+                                            self.status_kind = StatusKind::Ready;
+                                        }
+
+                                        if Self::animated_button(
+                                            ui,
+                                            "adv_mode_driver_btn",
+                                            "Compatible (Driver)",
+                                            11.0_f32,
+                                            false,
+                                            self.config.display_apply_mode
+                                                == DisplayApplyMode::CompatibleDriver,
+                                            true,
+                                        )
+                                        .on_hover_text(
+                                            "Usa únicamente modos registrados en el controlador gráfico; recomendado para pantalla completa exclusiva",
+                                        )
+                                        .clicked()
+                                            && self.config.display_apply_mode
+                                                != DisplayApplyMode::CompatibleDriver
+                                        {
+                                            self.config.display_apply_mode =
+                                                DisplayApplyMode::CompatibleDriver;
+                                            self.config.save();
+                                            self.missing_resolution = None;
+                                            self.status_text =
+                                                "Motor configurado: Compatible (Driver)"
+                                                    .to_string();
+                                            self.status_kind = StatusKind::Ready;
+                                        }
+                                    });
+
+                                    ui.horizontal_wrapped(|ui| {
+                                        let mut force_stretch = self.config.force_gpu_stretch_flag;
+                                        if ui
+                                            .checkbox(
+                                                &mut force_stretch,
+                                                RichText::new("Escalado GPU")
+                                                    .size(11.0_f32)
+                                                    .color(TEXT_MUTED),
+                                            )
+                                            .on_hover_text(
+                                                "Estira la imagen a pantalla completa en lugar de mantener franjas negras",
+                                            )
+                                            .changed()
+                                        {
+                                            self.config.force_gpu_stretch_flag = force_stretch;
+                                            self.config.save();
+                                        }
+
+                                        let mut confirm_safe =
+                                            self.config.confirm_resolution_change;
+                                        if ui
+                                            .checkbox(
+                                                &mut confirm_safe,
+                                                RichText::new("Confirmar cambio")
+                                                    .size(11.0_f32)
+                                                    .color(TEXT_MUTED),
+                                            )
+                                            .on_hover_text(
+                                                "Si la pantalla no se ve bien tras cambiar, revierte automáticamente en 12 segundos",
+                                            )
+                                            .changed()
+                                        {
+                                            self.config.confirm_resolution_change = confirm_safe;
+                                            self.config.save();
+                                        }
+                                    });
+
+                                    let hint_text = match self.config.display_apply_mode {
+                                        DisplayApplyMode::FastVirtual => {
+                                            "Modo rápido activo: aplica resoluciones mediante escalado virtual CCD sin reiniciar el monitor."
+                                        }
+                                        DisplayApplyMode::CompatibleDriver => {
+                                            "Modo compatible activo: aplica modos nativos del driver gráfico (permite registrar resoluciones)."
+                                        }
+                                    };
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(hint_text)
+                                                .size(10.5_f32)
+                                                .color(TEXT_DIM),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                        });
+                    }
                 });
         });
 
@@ -1577,8 +1706,10 @@ impl AspectShiftApp {
 
                         let tip = if is_driver_ready {
                             "Lista en el controlador gráfico — clic para aplicar"
+                        } else if self.config.display_apply_mode == DisplayApplyMode::FastVirtual {
+                            "No registrada en el driver — se aplicará mediante escalado rápido virtual"
                         } else {
-                            "No registrada de fábrica — puede requerir crearla en el panel GPU"
+                            "No registrada en el driver — clic para ver opción de crearla"
                         };
                         response.on_hover_text(tip);
                     }
@@ -1832,14 +1963,14 @@ impl AspectShiftApp {
                     ui.separator();
 
                     ui.label(
-                        RichText::new("2. Resoluciones personalizadas")
+                        RichText::new("2. Motor rápido y resoluciones personalizadas")
                             .size(12.5_f32)
                             .strong()
                             .color(TEXT_PRIMARY),
                     );
                     ui.label(
                         RichText::new(
-                            "Si Windows rechaza una resolución (código -2), créala una vez como resolución personalizada en el panel de tu tarjeta gráfica para registrarla en el controlador.",
+                            "En Opciones → Avanzado puedes alternar entre Rápido (Sin parpadeo, escalado virtual CCD ideal para escritorio y ventanas sin bordes) y Compatible (Driver). Si un programa en pantalla completa exclusiva requiere un modo nativo del controlador, créalo desde NVIDIA o el panel de tu GPU.",
                         )
                         .size(11.5_f32)
                         .color(TEXT_MUTED),
@@ -2001,10 +2132,11 @@ impl eframe::App for AspectShiftApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if self.config.restore_native_on_exit {
+            let apply_mode = self.config.display_apply_mode;
             let _ = self
                 .current_monitor()
                 .cloned()
-                .map(|m| restore_native(&m.device_name, Some(m.native_mode)));
+                .map(|m| restore_native(&m.device_name, Some(m.native_mode), apply_mode));
         }
     }
 }

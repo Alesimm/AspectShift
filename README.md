@@ -25,7 +25,8 @@ La idea nació de querer contar con una herramienta ligera, rápida y portable p
 
 ## Características
 
-- **Cambio directo por monitor**: Utiliza la API moderna CCD (`QueryDisplayConfig` / `SetDisplayConfig`) congelando la señal física del monitor y el resto de pantallas (con respaldo `ChangeDisplaySettingsExW`), evitando que se muevan o alteren ventanas en otros monitores.
+- **Cambio directo por monitor sin parpadeos innecesarios**: Utiliza la API moderna CCD (`QueryDisplayConfig` / `SetDisplayConfig` y modos virtuales `DESKTOP_IMAGE_INFO`) congelando la señal física del monitor y el resto de pantallas (con respaldo `ChangeDisplaySettingsExW`), evitando reinicios bruscos en otros monitores.
+- **Apartado Avanzado en Opciones**: Permite elegir entre el motor **Rápido (Sin parpadeo)** (escalado virtual CCD de Windows sin pantalla negra, ideal para escritorio y ventanas sin bordes) y **Compatible (Driver)** (modos registrados en el controlador para pantalla completa exclusiva), junto con `Escalado GPU` y `Confirmar cambio`.
 - **Interfaz minimalista y adaptable**: Cuadrícula responsive desde ventanas compactas (`340×340`) hasta escritorios amplios, con tipografía nativa del sistema, transiciones suaves y un panel desplegable **Opciones** para mantener la pantalla principal despejada.
 - **100% portable**: Un único archivo ejecutable (`AspectShift.exe`, ~1.9 MB) sin instaladores ni dependencias externas. Guarda tus resoluciones favoritas y personalizadas en `%LOCALAPPDATA%\AspectShift\aspectshift_config.json` para mantener limpio el Escritorio.
 - **Soporte multipantalla y tasas de refresco (`Hz`)**: Detecta pantallas conectadas, resolución nativa y frecuencias registradas por el controlador gráfico.
@@ -55,7 +56,8 @@ La idea nació de querer contar con una herramienta ligera, rápida y portable p
 3. Haz clic sobre cualquier tarjeta para cambiar la resolución al instante o abre **Opciones** para:
    - Elegir monitor y frecuencia (`Hz`).
    - Ingresar y guardar resoluciones personalizadas (`Ancho × Alto`).
-   - Adaptar manualmente una ventana específica a modo sin bordes o activar `Escalado GPU` y `Restaurar al salir`.
+   - Abrir **Avanzado** para elegir entre **Rápido (Sin parpadeo)** o **Compatible (Driver)**, o activar `Escalado GPU` y `Confirmar cambio`.
+   - Adaptar manualmente una ventana específica a modo sin bordes o activar `Restaurar al salir`.
 
 > **Nota sobre escalado a pantalla completa:** Para evitar franjas negras al usar resoluciones `4:3` o `5:4`, asegúrate de habilitar el escalado a pantalla completa por GPU en el panel de tu tarjeta gráfica (NVIDIA / AMD). Si una resolución personalizada no aparece registrada de fábrica en el controlador, agrégala una sola vez en dicho panel.
 

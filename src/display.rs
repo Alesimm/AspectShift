@@ -6,12 +6,15 @@ use std::time::Instant;
 use windows_sys::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig, SetDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SCALING_ASPECTRATIOCENTEREDMAX, DISPLAYCONFIG_SCALING_IDENTITY,
-    DISPLAYCONFIG_SCALING_STRETCHED, DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
-    SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_DESKTOP_IMAGE,
+    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_MODE_INFO_TYPE_TARGET,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SCALING_ASPECTRATIOCENTEREDMAX,
+    DISPLAYCONFIG_SCALING_IDENTITY, DISPLAYCONFIG_SCALING_STRETCHED,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_VIDEO_SIGNAL_INFO, QDC_ONLY_ACTIVE_PATHS,
+    QDC_VIRTUAL_MODE_AWARE, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    SDC_VIRTUAL_MODE_AWARE,
 };
+use windows_sys::Win32::Foundation::RECTL;
 use windows_sys::Win32::Graphics::Gdi::{
     ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsExW, CDS_FULLSCREEN,
     DEVMODEW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ACTIVE, DISPLAY_DEVICE_PRIMARY_DEVICE,
@@ -20,6 +23,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     DM_DISPLAYFIXEDOUTPUT, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION,
     ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS,
 };
+
+use crate::config::DisplayApplyMode;
 
 const DMDFO_DEFAULT: u32 = 0;
 const DMDFO_STRETCH: u32 = 1;
@@ -254,8 +259,128 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
     monitors
 }
 
-/// Cambia la resolución mediante la API moderna CCD congelando el TargetMode físico y las demás pantallas.
-fn try_apply_resolution_ccd(
+/// Calcula la región de destino dentro de `PathSourceSize` para escalado virtual estirado o centrado.
+fn compute_virtual_region(
+    src_w: u32,
+    src_h: u32,
+    path_w: i32,
+    path_h: i32,
+    force_stretch: bool,
+) -> RECTL {
+    if force_stretch || (src_w as i32 == path_w && src_h as i32 == path_h) {
+        return RECTL {
+            left: 0,
+            top: 0,
+            right: path_w,
+            bottom: path_h,
+        };
+    }
+
+    let safe_sw = src_w.max(1) as f64;
+    let safe_sh = src_h.max(1) as f64;
+    let safe_pw = path_w.max(1) as f64;
+    let safe_ph = path_h.max(1) as f64;
+    let scale = (safe_pw / safe_sw).min(safe_ph / safe_sh);
+
+    let scaled_w = ((safe_sw * scale).round() as i32).clamp(1, path_w);
+    let scaled_h = ((safe_sh * scale).round() as i32).clamp(1, path_h);
+    let left = (path_w - scaled_w) / 2;
+    let top = (path_h - scaled_h) / 2;
+
+    RECTL {
+        left,
+        top,
+        right: left + scaled_w,
+        bottom: top + scaled_h,
+    }
+}
+
+unsafe fn query_active_ccd_config(
+    qdc_flags: u32,
+) -> Option<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>)> {
+    let mut path_count = 0u32;
+    let mut mode_count = 0u32;
+    if GetDisplayConfigBufferSizes(qdc_flags, &mut path_count, &mut mode_count) != 0
+        || path_count == 0
+        || mode_count == 0
+    {
+        return None;
+    }
+
+    let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![zeroed(); path_count as usize];
+    let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![zeroed(); mode_count as usize];
+    if QueryDisplayConfig(
+        qdc_flags,
+        &mut path_count,
+        paths.as_mut_ptr(),
+        &mut mode_count,
+        modes.as_mut_ptr(),
+        null_mut(),
+    ) != 0
+    {
+        return None;
+    }
+    paths.truncate(path_count as usize);
+    modes.truncate(mode_count as usize);
+    Some((paths, modes))
+}
+
+unsafe fn find_path_for_device(
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    device_name: &str,
+) -> Option<usize> {
+    for (i, p) in paths.iter().enumerate() {
+        let mut src_name: DISPLAYCONFIG_SOURCE_DEVICE_NAME = zeroed();
+        src_name.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+            size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+            adapterId: p.sourceInfo.adapterId,
+            id: p.sourceInfo.id,
+        };
+        if DisplayConfigGetDeviceInfo(&mut src_name.header) == 0
+            && from_wide_slice(&src_name.viewGdiDeviceName) == device_name
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn requested_hz_differs(tgt_info: &DISPLAYCONFIG_VIDEO_SIGNAL_INFO, target_hz: Option<u32>) -> bool {
+    let Some(req_hz) = target_hz else {
+        return false;
+    };
+    let cur_hz = if tgt_info.vSyncFreq.Denominator > 0 {
+        (tgt_info.vSyncFreq.Numerator as f64 / tgt_info.vSyncFreq.Denominator as f64).round()
+            as u32
+    } else {
+        0
+    };
+    req_hz > 1 && cur_hz > 1 && req_hz.abs_diff(cur_hz) > 1
+}
+
+fn verify_applied_ccd_result(
+    device_name: &str,
+    width: u32,
+    height: u32,
+    start: Instant,
+) -> Option<DisplayChangeResult> {
+    let verified = query_current_mode(device_name)?;
+    if verified.width != width || verified.height != height {
+        return None;
+    }
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    Some(DisplayChangeResult {
+        applied_mode: verified,
+        message: format!(
+            "{} × {} @ {} Hz ({:.1} ms)",
+            verified.width, verified.height, verified.hz, elapsed_ms
+        ),
+    })
+}
+
+/// Cambia la resolución mediante modo virtual CCD congelando la señal física y `PathSourceSize` para evitar parpadeos.
+fn try_apply_resolution_ccd_virtual(
     device_name: &str,
     width: u32,
     height: u32,
@@ -264,50 +389,91 @@ fn try_apply_resolution_ccd(
 ) -> Option<DisplayChangeResult> {
     let start = Instant::now();
     unsafe {
-        let mut path_count = 0u32;
-        let mut mode_count = 0u32;
-        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != 0
-            || path_count == 0
-            || mode_count == 0
+        let (mut paths, mut modes) =
+            query_active_ccd_config(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE)?;
+        let path_idx = find_path_for_device(&paths, device_name)?;
+
+        let src_raw = paths[path_idx].sourceInfo.Anonymous.modeInfoIdx;
+        let tgt_raw = paths[path_idx].targetInfo.Anonymous.modeInfoIdx;
+        let src_idx = ((src_raw >> 16) & 0xFFFF) as usize;
+        let desk_idx = (tgt_raw & 0xFFFF) as usize;
+        let tgt_idx = ((tgt_raw >> 16) & 0xFFFF) as usize;
+
+        if src_idx >= modes.len()
+            || tgt_idx >= modes.len()
+            || desk_idx >= modes.len()
+            || modes[src_idx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+            || modes[tgt_idx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_TARGET
+            || modes[desk_idx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_DESKTOP_IMAGE
         {
             return None;
         }
 
-        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![zeroed(); path_count as usize];
-        let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![zeroed(); mode_count as usize];
-        if QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut path_count,
-            paths.as_mut_ptr(),
-            &mut mode_count,
-            modes.as_mut_ptr(),
-            null_mut(),
-        ) != 0
-        {
+        let tgt_info = modes[tgt_idx].Anonymous.targetMode.targetVideoSignalInfo;
+        let active_w = tgt_info.activeSize.cx;
+        let active_h = tgt_info.activeSize.cy;
+        if width > active_w || height > active_h || requested_hz_differs(&tgt_info, target_hz) {
             return None;
         }
-        paths.truncate(path_count as usize);
-        modes.truncate(mode_count as usize);
 
-        // Localiza el path activo que corresponde al nombre GDI seleccionado (ej. \\.\DISPLAY1)
-        let mut target_path_idx: Option<usize> = None;
-        for (i, p) in paths.iter().enumerate() {
-            let mut src_name: DISPLAYCONFIG_SOURCE_DEVICE_NAME = zeroed();
-            src_name.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-                size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
-                adapterId: p.sourceInfo.adapterId,
-                id: p.sourceInfo.id,
-            };
-            if DisplayConfigGetDeviceInfo(&mut src_name.header) == 0
-                && from_wide_slice(&src_name.viewGdiDeviceName) == device_name
-            {
-                target_path_idx = Some(i);
-                break;
-            }
+        let mut path_size = modes[desk_idx].Anonymous.desktopImageInfo.PathSourceSize;
+        if path_size.x <= 0 || path_size.y <= 0 {
+            path_size.x = active_w as i32;
+            path_size.y = active_h as i32;
+            modes[desk_idx].Anonymous.desktopImageInfo.PathSourceSize = path_size;
         }
 
-        let path_idx = target_path_idx?;
+        modes[src_idx].Anonymous.sourceMode.width = width;
+        modes[src_idx].Anonymous.sourceMode.height = height;
+        modes[desk_idx].Anonymous.desktopImageInfo.DesktopImageClip = RECTL {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
+        modes[desk_idx].Anonymous.desktopImageInfo.DesktopImageRegion =
+            compute_virtual_region(width, height, path_size.x, path_size.y, force_stretch_scaling);
+        paths[path_idx].targetInfo.scaling = DISPLAYCONFIG_SCALING_IDENTITY;
+
+        let base_flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE;
+        let mut rc = SetDisplayConfig(
+            paths.len() as u32,
+            paths.as_ptr(),
+            modes.len() as u32,
+            modes.as_ptr(),
+            base_flags,
+        );
+        if rc != 0 {
+            rc = SetDisplayConfig(
+                paths.len() as u32,
+                paths.as_ptr(),
+                modes.len() as u32,
+                modes.as_ptr(),
+                base_flags | SDC_ALLOW_CHANGES,
+            );
+        }
+        if rc != 0 {
+            return None;
+        }
+
+        verify_applied_ccd_result(device_name, width, height, start)
+    }
+}
+
+/// Cambia la resolución mediante CCD estándar congelando el TargetMode físico (sin forzar reinicios con SDC_NO_OPTIMIZATION).
+fn try_apply_resolution_ccd_standard(
+    device_name: &str,
+    width: u32,
+    height: u32,
+    target_hz: Option<u32>,
+    force_stretch_scaling: bool,
+    allow_changes_fallback: bool,
+) -> Option<DisplayChangeResult> {
+    let start = Instant::now();
+    unsafe {
+        let (mut paths, mut modes) = query_active_ccd_config(QDC_ONLY_ACTIVE_PATHS)?;
+        let path_idx = find_path_for_device(&paths, device_name)?;
+
         let src_idx = paths[path_idx].sourceInfo.Anonymous.modeInfoIdx as usize;
         let tgt_idx = paths[path_idx].targetInfo.Anonymous.modeInfoIdx as usize;
         if src_idx >= modes.len()
@@ -321,24 +487,10 @@ fn try_apply_resolution_ccd(
         let tgt_info = modes[tgt_idx].Anonymous.targetMode.targetVideoSignalInfo;
         let active_w = tgt_info.activeSize.cx;
         let active_h = tgt_info.activeSize.cy;
-        if width > active_w || height > active_h {
+        if width > active_w || height > active_h || requested_hz_differs(&tgt_info, target_hz) {
             return None;
         }
 
-        // Si el usuario pidió cambiar explícitamente los Hz respecto a la señal física actual, delega a GDI
-        if let Some(req_hz) = target_hz {
-            let cur_hz = if tgt_info.vSyncFreq.Denominator > 0 {
-                (tgt_info.vSyncFreq.Numerator as f64 / tgt_info.vSyncFreq.Denominator as f64)
-                    .round() as u32
-            } else {
-                0
-            };
-            if req_hz > 1 && cur_hz > 1 && req_hz.abs_diff(cur_hz) > 1 {
-                return None;
-            }
-        }
-
-        // Cambia solo el SourceMode y el escalado manteniendo congelado el TargetMode físico (Hz y timings)
         modes[src_idx].Anonymous.sourceMode.width = width;
         modes[src_idx].Anonymous.sourceMode.height = height;
         paths[path_idx].targetInfo.scaling = if width == active_w && height == active_h {
@@ -354,10 +506,10 @@ fn try_apply_resolution_ccd(
             paths.as_ptr(),
             modes.len() as u32,
             modes.as_ptr(),
-            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_NO_OPTIMIZATION,
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
         );
 
-        if rc != 0 {
+        if rc != 0 && allow_changes_fallback {
             rc = SetDisplayConfig(
                 paths.len() as u32,
                 paths.as_ptr(),
@@ -371,19 +523,7 @@ fn try_apply_resolution_ccd(
             return None;
         }
 
-        let verified = query_current_mode(device_name)?;
-        if verified.width != width || verified.height != height {
-            return None;
-        }
-
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        Some(DisplayChangeResult {
-            applied_mode: verified,
-            message: format!(
-                "{} × {} @ {} Hz ({:.1} ms)",
-                verified.width, verified.height, verified.hz, elapsed_ms
-            ),
-        })
+        verify_applied_ccd_result(device_name, width, height, start)
     }
 }
 
@@ -394,11 +534,42 @@ pub fn apply_resolution(
     height: u32,
     target_hz: Option<u32>,
     force_stretch_scaling: bool,
+    apply_mode: DisplayApplyMode,
 ) -> Result<DisplayChangeResult, DisplayError> {
-    if let Some(res) =
-        try_apply_resolution_ccd(device_name, width, height, target_hz, force_stretch_scaling)
-    {
-        return Ok(res);
+    match apply_mode {
+        DisplayApplyMode::FastVirtual => {
+            if let Some(res) = try_apply_resolution_ccd_virtual(
+                device_name,
+                width,
+                height,
+                target_hz,
+                force_stretch_scaling,
+            ) {
+                return Ok(res);
+            }
+            if let Some(res) = try_apply_resolution_ccd_standard(
+                device_name,
+                width,
+                height,
+                target_hz,
+                force_stretch_scaling,
+                true,
+            ) {
+                return Ok(res);
+            }
+        }
+        DisplayApplyMode::CompatibleDriver => {
+            if let Some(res) = try_apply_resolution_ccd_standard(
+                device_name,
+                width,
+                height,
+                target_hz,
+                force_stretch_scaling,
+                false,
+            ) {
+                return Ok(res);
+            }
+        }
     }
 
     let start = Instant::now();
@@ -506,29 +677,55 @@ pub fn apply_resolution(
     }
 }
 
+fn with_native_label(mut res: DisplayChangeResult, start: Instant) -> DisplayChangeResult {
+    res.message = format!(
+        "Nativa {} × {} @ {} Hz ({:.1} ms)",
+        res.applied_mode.width,
+        res.applied_mode.height,
+        res.applied_mode.hz,
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    res
+}
+
 /// Restaura la resolución nativa guardada en el registro para el monitor indicado.
 pub fn restore_native(
     device_name: &str,
     native_fallback: Option<DisplayMode>,
+    apply_mode: DisplayApplyMode,
 ) -> Result<DisplayChangeResult, DisplayError> {
     let start = Instant::now();
 
     if let Some(native) = native_fallback {
-        if let Some(mut res) = try_apply_resolution_ccd(
-            device_name,
-            native.width,
-            native.height,
-            Some(native.hz),
-            false,
-        ) {
-            res.message = format!(
-                "Nativa {} × {} @ {} Hz ({:.1} ms)",
-                res.applied_mode.width,
-                res.applied_mode.height,
-                res.applied_mode.hz,
-                start.elapsed().as_secs_f64() * 1000.0
-            );
-            return Ok(res);
+        let ccd_attempt = match apply_mode {
+            DisplayApplyMode::FastVirtual => try_apply_resolution_ccd_virtual(
+                device_name,
+                native.width,
+                native.height,
+                Some(native.hz),
+                false,
+            )
+            .or_else(|| {
+                try_apply_resolution_ccd_standard(
+                    device_name,
+                    native.width,
+                    native.height,
+                    Some(native.hz),
+                    false,
+                    true,
+                )
+            }),
+            DisplayApplyMode::CompatibleDriver => try_apply_resolution_ccd_standard(
+                device_name,
+                native.width,
+                native.height,
+                Some(native.hz),
+                false,
+                false,
+            ),
+        };
+        if let Some(res) = ccd_attempt {
+            return Ok(with_native_label(res, start));
         }
     }
 
@@ -546,31 +743,22 @@ pub fn restore_native(
                     native.height,
                     Some(native.hz),
                     false,
+                    apply_mode,
                 ) {
-                    return Ok(DisplayChangeResult {
-                        applied_mode: res.applied_mode,
-                        message: format!(
-                            "Nativa {} × {} @ {} Hz ({:.1} ms)",
-                            res.applied_mode.width,
-                            res.applied_mode.height,
-                            res.applied_mode.hz,
-                            start.elapsed().as_secs_f64() * 1000.0
-                        ),
-                    });
+                    return Ok(with_native_label(res, start));
                 }
             }
         }
 
         if code == DISP_CHANGE_SUCCESSFUL {
             let verified = after.or(native_fallback).unwrap_or_default();
-            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-            Ok(DisplayChangeResult {
-                applied_mode: verified,
-                message: format!(
-                    "Nativa {} × {} @ {} Hz ({:.1} ms)",
-                    verified.width, verified.height, verified.hz, elapsed_ms
-                ),
-            })
+            Ok(with_native_label(
+                DisplayChangeResult {
+                    applied_mode: verified,
+                    message: String::new(),
+                },
+                start,
+            ))
         } else if let Some(native) = native_fallback {
             apply_resolution(
                 device_name,
@@ -578,9 +766,10 @@ pub fn restore_native(
                 native.height,
                 Some(native.hz),
                 false,
+                apply_mode,
             )
         } else {
-            apply_resolution(device_name, 1920, 1080, None, false)
+            apply_resolution(device_name, 1920, 1080, None, false, apply_mode)
         }
     }
 }
@@ -618,5 +807,22 @@ fn explain_disp_change_error(code: i32, width: u32, height: u32) -> DisplayError
             not_registered: false,
             message: format!("Error al aplicar {}×{} (código {}).", width, height, other),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_virtual_region_stretched_fills_panel() {
+        let rc = compute_virtual_region(1440, 1080, 1920, 1080, true);
+        assert_eq!((rc.left, rc.top, rc.right, rc.bottom), (0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn compute_virtual_region_centered_preserves_aspect_ratio() {
+        let rc = compute_virtual_region(1440, 1080, 1920, 1080, false);
+        assert_eq!((rc.left, rc.top, rc.right, rc.bottom), (240, 0, 1680, 1080));
     }
 }
